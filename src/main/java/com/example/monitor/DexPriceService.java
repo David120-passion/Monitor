@@ -653,6 +653,14 @@ public class DexPriceService {
         return address == null ? null : address.toLowerCase();
     }
 
+    public BigInteger resolveTokenDecimals(String token) {
+        return fetchDecimals(token);
+    }
+
+    public String resolveTokenSymbol(String token) {
+        return fetchSymbol(token);
+    }
+
     /**
      * 查询 V3 工厂获得池子
      *
@@ -750,7 +758,8 @@ public class DexPriceService {
      */
     public enum PoolType {
         V2,
-        V3
+        V3,
+        V4
     }
 
     /**
