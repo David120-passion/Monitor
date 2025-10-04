@@ -1,5 +1,7 @@
 package com.example.monitor;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -26,22 +28,22 @@ public class DexConstants {
     public static final String BUSD_ADDRESS = "0xe9e7cea3dedca5984780bafc599bd69add087d56";
 
     /** PancakeSwap V2 工厂列表 */
-    public static final List<String> V2_FACTORIES = List.of(
+    public static final List<String> V2_FACTORIES = Collections.unmodifiableList(Arrays.asList(
             PANCAKE_V2_FACTORY,
             UNISWAP_V2_FACTORY
-    );
+    ));
 
     /** PancakeSwap V3 工厂列表 */
-    public static final List<String> V3_FACTORIES = List.of(
+    public static final List<String> V3_FACTORIES = Collections.unmodifiableList(Arrays.asList(
             PANCAKE_V3_FACTORY,
             UNISWAP_V3_FACTORY
-    );
+    ));
 
     /** PancakeSwap V4 工厂列表 */
-    public static final List<String> V4_FACTORIES = List.of(
+    public static final List<String> V4_FACTORIES = Collections.unmodifiableList(Arrays.asList(
             PANCAKE_V4_FACTORY,
             UNISWAP_V4_FACTORY
-    );
+    ));
 
     private DexConstants() {
     }

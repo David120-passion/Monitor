@@ -50,10 +50,12 @@ public class TokenInfoService {
                 Collections.singletonList(new TypeReference<Uint8>() {
                 })
         );
-        return callSingleValueReturn(tokenAddress, function)
-                .map(value -> (Uint8) value)
-                .map(Uint8::getValue)
-                .or(() -> Optional.of(BigInteger.valueOf(18))); // 默认 18 位精度
+        Optional<Type> result = callSingleValueReturn(tokenAddress, function);
+        if (result.isPresent()) {
+            Uint8 value = (Uint8) result.get();
+            return Optional.ofNullable(value.getValue());
+        }
+        return Optional.of(BigInteger.valueOf(18)); // 默认 18 位精度
     }
 
     /**

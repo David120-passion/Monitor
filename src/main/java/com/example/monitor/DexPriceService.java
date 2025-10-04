@@ -131,18 +131,18 @@ public class DexPriceService {
      */
     private Optional<BigDecimal> calculatePriceFromPair(PairMetadata pairMetadata, BigInteger blockNumber) {
         Optional<Reserves> reservesOpt = getReserves(pairMetadata, blockNumber);
-        if (reservesOpt.isEmpty()) {
+        if (!reservesOpt.isPresent()) {
             return Optional.empty();
         }
         Reserves reserves = reservesOpt.get();
         BigDecimal tokenReserve;
         BigDecimal quoteReserve;
         if (pairMetadata.token0.equalsIgnoreCase(tokenAddress)) {
-            tokenReserve = reserves.reserve0.divide(BigDecimal.TEN.pow(tokenDecimals.intValue()), 18, RoundingMode.HALF_UP);
-            quoteReserve = reserves.reserve1.divide(BigDecimal.TEN.pow(pairMetadata.token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            tokenReserve = reserves.getReserve0().divide(BigDecimal.TEN.pow(tokenDecimals.intValue()), 18, RoundingMode.HALF_UP);
+            quoteReserve = reserves.getReserve1().divide(BigDecimal.TEN.pow(pairMetadata.token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
         } else {
-            tokenReserve = reserves.reserve1.divide(BigDecimal.TEN.pow(tokenDecimals.intValue()), 18, RoundingMode.HALF_UP);
-            quoteReserve = reserves.reserve0.divide(BigDecimal.TEN.pow(pairMetadata.token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            tokenReserve = reserves.getReserve1().divide(BigDecimal.TEN.pow(tokenDecimals.intValue()), 18, RoundingMode.HALF_UP);
+            quoteReserve = reserves.getReserve0().divide(BigDecimal.TEN.pow(pairMetadata.token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
         }
         if (tokenReserve.compareTo(BigDecimal.ZERO) == 0) {
             return Optional.empty();
@@ -308,7 +308,22 @@ public class DexPriceService {
     /**
      * 储备数据结构
      */
-    private record Reserves(BigDecimal reserve0, BigDecimal reserve1) {
+    private static class Reserves {
+        private final BigDecimal reserve0;
+        private final BigDecimal reserve1;
+
+        private Reserves(BigDecimal reserve0, BigDecimal reserve1) {
+            this.reserve0 = reserve0;
+            this.reserve1 = reserve1;
+        }
+
+        public BigDecimal getReserve0() {
+            return reserve0;
+        }
+
+        public BigDecimal getReserve1() {
+            return reserve1;
+        }
     }
 
     /**

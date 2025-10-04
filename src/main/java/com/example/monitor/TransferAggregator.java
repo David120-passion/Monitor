@@ -74,8 +74,8 @@ public class TransferAggregator {
     public synchronized BigDecimal getVolume24h() {
         long cutoff = Instant.now().minusSeconds(24 * 3600).toEpochMilli();
         return recentTransfers.stream()
-                .filter(record -> record.timestamp() >= cutoff)
-                .map(TransferRecord::usdValue)
+                .filter(record -> record.getTimestamp() >= cutoff)
+                .map(TransferRecord::getUsdValue)
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 
@@ -86,9 +86,9 @@ public class TransferAggregator {
      */
     public synchronized BigDecimal getNetFlow() {
         return recentTransfers.stream()
-                .map(record -> record.direction() == TransferRecord.Direction.BUY
-                        ? record.usdValue()
-                        : record.usdValue().negate())
+                .map(record -> record.getDirection() == TransferRecord.Direction.BUY
+                        ? record.getUsdValue()
+                        : record.getUsdValue().negate())
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
     }
 
@@ -99,7 +99,7 @@ public class TransferAggregator {
      */
     private void cleanup(long currentTimestamp) {
         long cutoff = currentTimestamp - 24 * 3600 * 1000L;
-        while (!recentTransfers.isEmpty() && recentTransfers.peek().timestamp() < cutoff) {
+        while (!recentTransfers.isEmpty() && recentTransfers.peek().getTimestamp() < cutoff) {
             recentTransfers.poll();
         }
     }
@@ -107,7 +107,29 @@ public class TransferAggregator {
     /**
      * 转账记录结构体
      */
-    public record TransferRecord(long timestamp, BigDecimal usdValue, Direction direction) {
+    public static class TransferRecord {
+        private final long timestamp;
+        private final BigDecimal usdValue;
+        private final Direction direction;
+
+        public TransferRecord(long timestamp, BigDecimal usdValue, Direction direction) {
+            this.timestamp = timestamp;
+            this.usdValue = usdValue;
+            this.direction = direction;
+        }
+
+        public long getTimestamp() {
+            return timestamp;
+        }
+
+        public BigDecimal getUsdValue() {
+            return usdValue;
+        }
+
+        public Direction getDirection() {
+            return direction;
+        }
+
         /** 方向枚举 */
         public enum Direction {
             /** 买入 */
