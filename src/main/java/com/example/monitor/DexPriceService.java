@@ -6,11 +6,16 @@ import org.web3j.abi.FunctionEncoder;
 import org.web3j.abi.FunctionReturnDecoder;
 import org.web3j.abi.TypeReference;
 import org.web3j.abi.datatypes.Address;
+import org.web3j.abi.datatypes.Bool;
 import org.web3j.abi.datatypes.Function;
 import org.web3j.abi.datatypes.Type;
+import org.web3j.abi.datatypes.generated.Int24;
 import org.web3j.abi.datatypes.generated.Uint112;
+import org.web3j.abi.datatypes.generated.Uint160;
+import org.web3j.abi.datatypes.generated.Uint16;
 import org.web3j.abi.datatypes.generated.Uint24;
 import org.web3j.abi.datatypes.generated.Uint32;
+import org.web3j.abi.datatypes.generated.Uint8;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.DefaultBlockParameterName;
@@ -21,8 +26,16 @@ import org.web3j.utils.Numeric;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.MathContext;
 import java.math.RoundingMode;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -40,12 +53,21 @@ public class DexPriceService {
     /** 代币符号 */
     private final String tokenSymbol;
 
+    /** token 信息服务 */
+    private final TokenInfoService tokenInfoService;
+    /** 代币精度缓存 */
+    private final Map<String, BigInteger> decimalsCache = new ConcurrentHashMap<>();
+    /** 代币符号缓存 */
+    private final Map<String, String> symbolCache = new ConcurrentHashMap<>();
     /** 按 token 组合缓存的 V2 配对信息 */
-    private final Map<String, PairMetadata> pairCacheByTokens = new ConcurrentHashMap<>();
+    private final Map<String, List<PairMetadata>> pairCacheByTokens = new ConcurrentHashMap<>();
     /** 按地址缓存的池子信息 */
     private final Map<String, PairMetadata> pairCacheByAddress = new ConcurrentHashMap<>();
     /** 按 token 与费率缓存的 V3 池子信息 */
     private final Map<String, PairMetadata> v3PoolCache = new ConcurrentHashMap<>();
+
+    /** 价格计算精度 */
+    private static final MathContext PRICE_MATH_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
 
     /**
      * 构造函数
@@ -60,6 +82,7 @@ public class DexPriceService {
         this.tokenAddress = tokenAddress;
         this.tokenDecimals = tokenDecimals;
         this.tokenSymbol = tokenSymbol;
+        this.tokenInfoService = new TokenInfoService(web3j);
     }
 
     /**
@@ -69,21 +92,58 @@ public class DexPriceService {
      * @return 价格
      */
     public Optional<BigDecimal> getPriceAtBlock(BigInteger blockNumber) {
-        Optional<PairMetadata> busdPair = findOrCreatePair(tokenAddress, DexConstants.BUSD_ADDRESS);
-        if (busdPair.isPresent()) {
-            return busdPair.flatMap(pair -> calculatePriceFromPair(pair, blockNumber));
+        Optional<BigDecimal> directBusd = getBestPriceForPair(tokenAddress, DexConstants.BUSD_ADDRESS, blockNumber);
+        if (directBusd.isPresent()) {
+            return directBusd.map(value -> value.setScale(8, RoundingMode.HALF_UP));
         }
-        Optional<PairMetadata> wbnbPair = findOrCreatePair(tokenAddress, DexConstants.WBNB_ADDRESS);
-        Optional<PairMetadata> bnbBusdPair = findOrCreatePair(DexConstants.WBNB_ADDRESS, DexConstants.BUSD_ADDRESS);
-        if (wbnbPair.isPresent() && bnbBusdPair.isPresent()) {
-            Optional<BigDecimal> tokenWbnbPrice = calculatePriceFromPair(wbnbPair.get(), blockNumber);
-            Optional<BigDecimal> wbnbBusdPrice = calculatePriceFromPair(bnbBusdPair.get(), blockNumber);
-            if (tokenWbnbPrice.isPresent() && wbnbBusdPrice.isPresent()) {
-                return Optional.of(tokenWbnbPrice.get().multiply(wbnbBusdPrice.get()))
-                        .map(value -> value.setScale(8, RoundingMode.HALF_UP));
+
+        Optional<BigDecimal> viaWbnb = combinePrices(
+                getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, blockNumber),
+                getBestPriceForPair(DexConstants.WBNB_ADDRESS, DexConstants.BUSD_ADDRESS, blockNumber)
+        );
+        if (viaWbnb.isPresent()) {
+            return viaWbnb.map(value -> value.setScale(8, RoundingMode.HALF_UP));
+        }
+
+        return Optional.empty();
+    }
+
+    private Optional<BigDecimal> getBestPriceForPair(String baseToken, String quoteToken, BigInteger blockNumber) {
+        List<PairMetadata> v2Pairs = findOrCreatePairs(baseToken, quoteToken);
+        Optional<BigDecimal> v2Price = getBestPriceFromPairs(v2Pairs, baseToken, blockNumber);
+        if (v2Price.isPresent()) {
+            return v2Price;
+        }
+        List<PairMetadata> v3Pools = findOrCreateV3Pools(baseToken, quoteToken);
+        return getBestPriceFromPairs(v3Pools, baseToken, blockNumber);
+    }
+
+    private Optional<BigDecimal> getBestPriceFromPairs(List<PairMetadata> pairs, String baseToken, BigInteger blockNumber) {
+        for (PairMetadata metadata : pairs) {
+            Optional<BigDecimal> price = calculatePrice(metadata, baseToken, blockNumber);
+            if (price.isPresent()) {
+                return price.map(value -> value.setScale(18, RoundingMode.HALF_UP));
             }
         }
         return Optional.empty();
+    }
+
+    private Optional<BigDecimal> combinePrices(Optional<BigDecimal> first, Optional<BigDecimal> second) {
+        if (first.isPresent() && second.isPresent()) {
+            BigDecimal combined = first.get().multiply(second.get(), PRICE_MATH_CONTEXT);
+            return Optional.of(combined.setScale(18, RoundingMode.HALF_UP));
+        }
+        return Optional.empty();
+    }
+
+    private Optional<BigDecimal> calculatePrice(PairMetadata metadata, String baseToken, BigInteger blockNumber) {
+        if (metadata == null) {
+            return Optional.empty();
+        }
+        if (metadata.poolType == PoolType.V3) {
+            return calculateV3Price(metadata, baseToken, blockNumber);
+        }
+        return calculateV2Price(metadata, baseToken, blockNumber);
     }
 
     /**
@@ -134,25 +194,151 @@ public class DexPriceService {
      * @param blockNumber  区块高度
      * @return 价格
      */
-    private Optional<BigDecimal> calculatePriceFromPair(PairMetadata pairMetadata, BigInteger blockNumber) {
+    private Optional<BigDecimal> calculateV2Price(PairMetadata pairMetadata, String baseToken, BigInteger blockNumber) {
         Optional<Reserves> reservesOpt = getReserves(pairMetadata, blockNumber);
         if (!reservesOpt.isPresent()) {
             return Optional.empty();
         }
         Reserves reserves = reservesOpt.get();
-        BigDecimal tokenReserve;
-        BigDecimal quoteReserve;
-        if (pairMetadata.token0.equalsIgnoreCase(tokenAddress)) {
-            tokenReserve = reserves.getReserve0().divide(BigDecimal.TEN.pow(tokenDecimals.intValue()), 18, RoundingMode.HALF_UP);
-            quoteReserve = reserves.getReserve1().divide(BigDecimal.TEN.pow(pairMetadata.token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
-        } else {
-            tokenReserve = reserves.getReserve1().divide(BigDecimal.TEN.pow(tokenDecimals.intValue()), 18, RoundingMode.HALF_UP);
-            quoteReserve = reserves.getReserve0().divide(BigDecimal.TEN.pow(pairMetadata.token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
+        if (pairMetadata.token0.equalsIgnoreCase(baseToken)) {
+            BigDecimal baseReserve = reserves.getReserve0()
+                    .divide(BigDecimal.TEN.pow(pairMetadata.token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            BigDecimal quoteReserve = reserves.getReserve1()
+                    .divide(BigDecimal.TEN.pow(pairMetadata.token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            if (baseReserve.compareTo(BigDecimal.ZERO) == 0) {
+                return Optional.empty();
+            }
+            return Optional.of(quoteReserve.divide(baseReserve, 18, RoundingMode.HALF_UP));
+        } else if (pairMetadata.token1.equalsIgnoreCase(baseToken)) {
+            BigDecimal baseReserve = reserves.getReserve1()
+                    .divide(BigDecimal.TEN.pow(pairMetadata.token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            BigDecimal quoteReserve = reserves.getReserve0()
+                    .divide(BigDecimal.TEN.pow(pairMetadata.token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            if (baseReserve.compareTo(BigDecimal.ZERO) == 0) {
+                return Optional.empty();
+            }
+            return Optional.of(quoteReserve.divide(baseReserve, 18, RoundingMode.HALF_UP));
         }
-        if (tokenReserve.compareTo(BigDecimal.ZERO) == 0) {
+        return Optional.empty();
+    }
+
+    private Optional<BigDecimal> calculateV3Price(PairMetadata pairMetadata, String baseToken, BigInteger blockNumber) {
+        Optional<Slot0Data> slot0Opt = getSlot0(pairMetadata, blockNumber);
+        if (!slot0Opt.isPresent()) {
             return Optional.empty();
         }
-        return Optional.of(quoteReserve.divide(tokenReserve, 18, RoundingMode.HALF_UP));
+        Slot0Data slot0 = slot0Opt.get();
+        if (slot0.sqrtPriceX96.equals(BigInteger.ZERO)) {
+            return Optional.empty();
+        }
+        BigDecimal sqrtPrice = new BigDecimal(slot0.sqrtPriceX96);
+        BigDecimal numerator = sqrtPrice.multiply(sqrtPrice, PRICE_MATH_CONTEXT);
+        BigDecimal denominator = new BigDecimal(BigInteger.ONE.shiftLeft(192));
+        BigDecimal priceToken1PerToken0 = numerator.divide(denominator, 18, RoundingMode.HALF_UP);
+        priceToken1PerToken0 = adjustForDecimals(priceToken1PerToken0, pairMetadata.token0Decimals, pairMetadata.token1Decimals);
+
+        if (pairMetadata.token0.equalsIgnoreCase(baseToken)) {
+            return Optional.of(priceToken1PerToken0.setScale(18, RoundingMode.HALF_UP));
+        } else if (pairMetadata.token1.equalsIgnoreCase(baseToken)) {
+            if (priceToken1PerToken0.compareTo(BigDecimal.ZERO) == 0) {
+                return Optional.empty();
+            }
+            return Optional.of(BigDecimal.ONE.divide(priceToken1PerToken0, 18, RoundingMode.HALF_UP));
+        }
+        return Optional.empty();
+    }
+
+    private Optional<Slot0Data> getSlot0(PairMetadata pairMetadata, BigInteger blockNumber) {
+        Function function = new Function(
+                "slot0",
+                Collections.emptyList(),
+                Arrays.asList(
+                        new TypeReference<Uint160>() {
+                        },
+                        new TypeReference<Int24>() {
+                        },
+                        new TypeReference<Uint16>() {
+                        },
+                        new TypeReference<Uint16>() {
+                        },
+                        new TypeReference<Uint16>() {
+                        },
+                        new TypeReference<Uint8>() {
+                        },
+                        new TypeReference<Bool>() {
+                        }
+                )
+        );
+        String data = FunctionEncoder.encode(function);
+        Transaction tx = Transaction.createEthCallTransaction(null, pairMetadata.pairAddress, data);
+        try {
+            EthCall response = web3j.ethCall(tx, DefaultBlockParameter.valueOf(blockNumber)).send();
+            if (response.isReverted()) {
+                log.warn("slot0 reverted for pool {}", pairMetadata.pairAddress);
+                return Optional.empty();
+            }
+            List<Type> values = FunctionReturnDecoder.decode(response.getValue(), function.getOutputParameters());
+            if (values.size() < 2) {
+                return Optional.empty();
+            }
+            BigInteger sqrtPriceX96 = ((Uint160) values.get(0)).getValue();
+            int tick = ((Int24) values.get(1)).getValue().intValue();
+            return Optional.of(new Slot0Data(sqrtPriceX96, tick));
+        } catch (IOException e) {
+            log.error("Failed to query slot0 for pool {}", pairMetadata.pairAddress, e);
+            return Optional.empty();
+        }
+    }
+
+    private BigDecimal adjustForDecimals(BigDecimal price, BigInteger token0Decimals, BigInteger token1Decimals) {
+        int diff = token0Decimals.intValue() - token1Decimals.intValue();
+        if (diff == 0) {
+            return price;
+        }
+        BigDecimal factor = BigDecimal.TEN.pow(Math.abs(diff));
+        if (diff > 0) {
+            return price.multiply(factor, PRICE_MATH_CONTEXT);
+        }
+        return price.divide(factor, PRICE_MATH_CONTEXT);
+    }
+
+    private BigDecimal priceFromTick(int tick, PairMetadata metadata) {
+        BigDecimal result = BigDecimal.ONE;
+        BigDecimal base = BigDecimal.valueOf(1.0001);
+        int absTick = Math.abs(tick);
+        while (absTick > 0) {
+            if ((absTick & 1) == 1) {
+                result = result.multiply(base, PRICE_MATH_CONTEXT);
+            }
+            base = base.multiply(base, PRICE_MATH_CONTEXT);
+            absTick >>= 1;
+        }
+        if (tick < 0) {
+            result = BigDecimal.ONE.divide(result, PRICE_MATH_CONTEXT);
+        }
+        result = adjustForDecimals(result, metadata.token0Decimals, metadata.token1Decimals);
+        return result;
+    }
+
+    public Optional<PriceRange> calculateTargetPriceRange(PairMetadata metadata, int tickLower, int tickUpper) {
+        if (metadata == null || metadata.poolType != PoolType.V3) {
+            return Optional.empty();
+        }
+        BigDecimal lowerRatio = priceFromTick(tickLower, metadata);
+        BigDecimal upperRatio = priceFromTick(tickUpper, metadata);
+        if (metadata.token0.equalsIgnoreCase(tokenAddress)) {
+            BigDecimal lower = lowerRatio.setScale(18, RoundingMode.HALF_UP);
+            BigDecimal upper = upperRatio.setScale(18, RoundingMode.HALF_UP);
+            return Optional.of(new PriceRange(lower, upper));
+        } else if (metadata.token1.equalsIgnoreCase(tokenAddress)) {
+            if (lowerRatio.compareTo(BigDecimal.ZERO) == 0 || upperRatio.compareTo(BigDecimal.ZERO) == 0) {
+                return Optional.empty();
+            }
+            BigDecimal lower = BigDecimal.ONE.divide(upperRatio, PRICE_MATH_CONTEXT).setScale(18, RoundingMode.HALF_UP);
+            BigDecimal upper = BigDecimal.ONE.divide(lowerRatio, PRICE_MATH_CONTEXT).setScale(18, RoundingMode.HALF_UP);
+            return Optional.of(new PriceRange(lower, upper));
+        }
+        return Optional.empty();
     }
 
     /**
@@ -163,18 +349,37 @@ public class DexPriceService {
      * @return 池子信息
      */
     public Optional<PairMetadata> findOrCreatePair(String tokenA, String tokenB) {
+        return findOrCreatePairs(tokenA, tokenB).stream().findFirst();
+    }
+
+    /**
+     * 查找或创建所有 V2 配对信息
+     *
+     * @param tokenA 代币 A
+     * @param tokenB 代币 B
+     * @return 池子信息列表
+     */
+    public List<PairMetadata> findOrCreatePairs(String tokenA, String tokenB) {
         String key = buildPairKey(tokenA, tokenB);
-        if (pairCacheByTokens.containsKey(key)) {
-            return Optional.of(pairCacheByTokens.get(key));
+        List<PairMetadata> cached = pairCacheByTokens.get(key);
+        List<PairMetadata> result = new ArrayList<>();
+        Set<String> seenAddresses = ConcurrentHashMap.newKeySet();
+        if (cached != null) {
+            result.addAll(cached);
+            cached.stream().map(meta -> normalize(meta.pairAddress)).forEach(seenAddresses::add);
         }
         for (String factory : DexConstants.V2_FACTORIES) {
             Optional<PairMetadata> metadata = queryPair(factory, tokenA, tokenB);
             if (metadata.isPresent()) {
-                cachePairMetadata(metadata.get(), true);
-                return metadata;
+                PairMetadata pair = metadata.get();
+                String normalizedAddress = normalize(pair.pairAddress);
+                if (seenAddresses.add(normalizedAddress)) {
+                    result.add(pair);
+                    cachePairMetadata(pair, true);
+                }
             }
         }
-        return Optional.empty();
+        return result;
     }
 
     /**
@@ -241,7 +446,7 @@ public class DexPriceService {
             if (isZeroAddress(pairAddress)) {
                 return Optional.empty();
             }
-            return loadPairMetadata(pairAddress, true);
+            return loadPairMetadata(pairAddress, true, PoolType.V2, null);
         } catch (IOException e) {
             log.error("Failed to query pair from factory {}", factory, e);
             return Optional.empty();
@@ -255,24 +460,34 @@ public class DexPriceService {
      * @return 元数据
      */
     public Optional<PairMetadata> loadPairMetadata(String pairAddress) {
-        return loadPairMetadata(pairAddress, true);
+        return loadPairMetadata(pairAddress, true, PoolType.V2, null);
     }
 
-    /**
-     * 加载池子元数据
-     *
-     * @param pairAddress   池子地址
-     * @param cacheByTokens 是否按 token 组合缓存
-     * @return 元数据
-     */
     public Optional<PairMetadata> loadPairMetadata(String pairAddress, boolean cacheByTokens) {
+        return loadPairMetadata(pairAddress, cacheByTokens, PoolType.V2, null);
+    }
+
+    public Optional<PairMetadata> loadPairMetadata(String pairAddress, boolean cacheByTokens, PoolType poolType) {
+        return loadPairMetadata(pairAddress, cacheByTokens, poolType, null);
+    }
+
+    public Optional<PairMetadata> loadPairMetadata(String pairAddress, boolean cacheByTokens, PoolType poolType, BigInteger fee) {
         String normalizedAddress = normalize(pairAddress);
-        if (pairCacheByAddress.containsKey(normalizedAddress)) {
-            PairMetadata metadata = pairCacheByAddress.get(normalizedAddress);
-            if (cacheByTokens) {
-                cachePairMetadata(metadata, true);
+        PairMetadata existing = pairCacheByAddress.get(normalizedAddress);
+        if (existing != null) {
+            PairMetadata updated = existing;
+            if (poolType != null && existing.poolType != poolType) {
+                updated = existing.withPoolType(poolType);
             }
-            return Optional.of(metadata);
+            if (fee != null) {
+                updated = updated.withFee(fee);
+            }
+            if (updated != existing) {
+                cachePairMetadata(updated, cacheByTokens || poolType == PoolType.V2);
+            } else if (cacheByTokens) {
+                cachePairMetadata(existing, true);
+            }
+            return Optional.of(updated);
         }
         try {
             String token0 = callAddressFunction(pairAddress, "token0");
@@ -282,8 +497,13 @@ public class DexPriceService {
             }
             BigInteger token0Decimals = fetchDecimals(token0);
             BigInteger token1Decimals = fetchDecimals(token1);
-            PairMetadata metadata = new PairMetadata(pairAddress, token0, token1, token0Decimals, token1Decimals);
-            cachePairMetadata(metadata, cacheByTokens);
+            String token0Symbol = fetchSymbol(token0);
+            String token1Symbol = fetchSymbol(token1);
+            PairMetadata metadata = new PairMetadata(pairAddress, token0, token1, token0Decimals, token1Decimals, token0Symbol, token1Symbol, poolType, fee);
+            if (metadata.poolType == PoolType.V3 && metadata.fee == null) {
+                metadata = metadata.withFee(fetchFee(pairAddress));
+            }
+            cachePairMetadata(metadata, cacheByTokens || poolType == PoolType.V2);
             return Optional.of(metadata);
         } catch (IOException e) {
             log.error("Failed to load pair metadata for {}", pairAddress, e);
@@ -301,11 +521,32 @@ public class DexPriceService {
         if (metadata == null) {
             return;
         }
-        pairCacheByAddress.put(normalize(metadata.pairAddress), metadata);
+        String normalizedAddress = normalize(metadata.pairAddress);
+        pairCacheByAddress.put(normalizedAddress, metadata);
         if (cacheByTokens) {
-            pairCacheByTokens.put(buildPairKey(metadata.token0, metadata.token1), metadata);
-            pairCacheByTokens.put(buildPairKey(metadata.token1, metadata.token0), metadata);
+            addPairToTokenCache(metadata.token0, metadata.token1, metadata);
+            addPairToTokenCache(metadata.token1, metadata.token0, metadata);
         }
+    }
+
+    private void addPairToTokenCache(String tokenA, String tokenB, PairMetadata metadata) {
+        String key = buildPairKey(tokenA, tokenB);
+        pairCacheByTokens.compute(key, (k, list) -> {
+            List<PairMetadata> updated = list == null ? new ArrayList<>() : new ArrayList<>(list);
+            boolean replaced = false;
+            String normalizedAddress = normalize(metadata.pairAddress);
+            for (int i = 0; i < updated.size(); i++) {
+                if (normalize(updated.get(i).pairAddress).equals(normalizedAddress)) {
+                    updated.set(i, metadata);
+                    replaced = true;
+                    break;
+                }
+            }
+            if (!replaced) {
+                updated.add(metadata);
+            }
+            return updated;
+        });
     }
 
     /**
@@ -343,8 +584,40 @@ public class DexPriceService {
      * @return 精度
      */
     private BigInteger fetchDecimals(String token) {
-        TokenInfoService tokenInfoService = new TokenInfoService(web3j);
-        return tokenInfoService.loadDecimals(token).orElse(BigInteger.valueOf(18));
+        String normalized = normalize(token);
+        return decimalsCache.computeIfAbsent(normalized, key ->
+                tokenInfoService.loadDecimals(token).orElse(BigInteger.valueOf(18)));
+    }
+
+    private String fetchSymbol(String token) {
+        String normalized = normalize(token);
+        return symbolCache.computeIfAbsent(normalized, key ->
+                tokenInfoService.loadSymbol(token).orElse(normalized));
+    }
+
+    private BigInteger fetchFee(String poolAddress) {
+        Function function = new Function(
+                "fee",
+                Collections.emptyList(),
+                Collections.singletonList(new TypeReference<Uint24>() {
+                })
+        );
+        String data = FunctionEncoder.encode(function);
+        Transaction tx = Transaction.createEthCallTransaction(null, poolAddress, data);
+        try {
+            EthCall response = web3j.ethCall(tx, DefaultBlockParameterName.LATEST).send();
+            if (response.isReverted()) {
+                return null;
+            }
+            List<Type> values = FunctionReturnDecoder.decode(response.getValue(), function.getOutputParameters());
+            if (values.isEmpty()) {
+                return null;
+            }
+            return ((Uint24) values.get(0)).getValue();
+        } catch (IOException e) {
+            log.error("Failed to fetch fee for pool {}", poolAddress, e);
+            return null;
+        }
     }
 
     /**
@@ -411,7 +684,7 @@ public class DexPriceService {
             if (isZeroAddress(poolAddress)) {
                 return Optional.empty();
             }
-            return loadPairMetadata(poolAddress, false);
+            return loadPairMetadata(poolAddress, false, PoolType.V3, fee);
         } catch (IOException e) {
             log.error("Failed to query V3 pool from factory {} with fee {}", factory, fee, e);
             return Optional.empty();
@@ -449,30 +722,86 @@ public class DexPriceService {
         }
     }
 
+    private static class Slot0Data {
+        private final BigInteger sqrtPriceX96;
+        private final int tick;
+
+        private Slot0Data(BigInteger sqrtPriceX96, int tick) {
+            this.sqrtPriceX96 = sqrtPriceX96;
+            this.tick = tick;
+        }
+    }
+
+    /**
+     * V3 价格区间
+     */
+    public static class PriceRange {
+        public final BigDecimal lower;
+        public final BigDecimal upper;
+
+        public PriceRange(BigDecimal lower, BigDecimal upper) {
+            this.lower = lower;
+            this.upper = upper;
+        }
+    }
+
+    /**
+     * 池子类型
+     */
+    public enum PoolType {
+        V2,
+        V3
+    }
+
     /**
      * 池子元数据
      */
     public static class PairMetadata {
-        /** 池子地址 */
         public final String pairAddress;
-        /** token0 地址 */
         public final String token0;
-        /** token1 地址 */
         public final String token1;
-        /** token0 精度 */
         public final BigInteger token0Decimals;
-        /** token1 精度 */
         public final BigInteger token1Decimals;
+        public final String token0Symbol;
+        public final String token1Symbol;
+        public final PoolType poolType;
+        public final BigInteger fee;
 
-        /**
-         * 构造函数
-         */
-        public PairMetadata(String pairAddress, String token0, String token1, BigInteger token0Decimals, BigInteger token1Decimals) {
+        public PairMetadata(String pairAddress, String token0, String token1,
+                             BigInteger token0Decimals, BigInteger token1Decimals,
+                             String token0Symbol, String token1Symbol,
+                             PoolType poolType, BigInteger fee) {
             this.pairAddress = pairAddress;
             this.token0 = token0;
             this.token1 = token1;
             this.token0Decimals = token0Decimals;
             this.token1Decimals = token1Decimals;
+            this.token0Symbol = token0Symbol;
+            this.token1Symbol = token1Symbol;
+            this.poolType = poolType == null ? PoolType.V2 : poolType;
+            this.fee = fee;
+        }
+
+        public PairMetadata withPoolType(PoolType poolType) {
+            if (poolType == null || this.poolType == poolType) {
+                return this;
+            }
+            return new PairMetadata(pairAddress, token0, token1, token0Decimals, token1Decimals,
+                    token0Symbol, token1Symbol, poolType, fee);
+        }
+
+        public PairMetadata withFee(BigInteger fee) {
+            if (fee == null || (this.fee != null && this.fee.equals(fee))) {
+                return this;
+            }
+            return new PairMetadata(pairAddress, token0, token1, token0Decimals, token1Decimals,
+                    token0Symbol, token1Symbol, poolType, fee);
+        }
+
+        public String getDisplayName() {
+            String symbol0 = token0Symbol != null ? token0Symbol : token0;
+            String symbol1 = token1Symbol != null ? token1Symbol : token1;
+            return symbol0.toLowerCase(java.util.Locale.ROOT) + "-" + symbol1.toLowerCase(java.util.Locale.ROOT);
         }
     }
 }

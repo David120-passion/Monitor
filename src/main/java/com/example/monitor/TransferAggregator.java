@@ -72,6 +72,7 @@ public class TransferAggregator {
      * @return 24 小时成交额
      */
     public synchronized BigDecimal getVolume24h() {
+        cleanup(Instant.now().toEpochMilli());
         long cutoff = Instant.now().minusSeconds(24 * 3600).toEpochMilli();
         return recentTransfers.stream()
                 .filter(record -> record.getTimestamp() >= cutoff)
@@ -85,6 +86,7 @@ public class TransferAggregator {
      * @return 净流入
      */
     public synchronized BigDecimal getNetFlow() {
+        cleanup(Instant.now().toEpochMilli());
         return recentTransfers.stream()
                 .map(record -> record.getDirection() == TransferRecord.Direction.BUY
                         ? record.getUsdValue()
