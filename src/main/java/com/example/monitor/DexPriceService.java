@@ -178,29 +178,37 @@ public class DexPriceService {
     }
 
     /**
-     * 查找或创建 V3 池子信息
+     * 查找或创建所有可用的 V3 池子信息
      *
      * @param tokenA 代币 A
      * @param tokenB 代币 B
-     * @return 池子信息
+     * @return 池子信息列表
      */
-    public Optional<PairMetadata> findOrCreateV3Pool(String tokenA, String tokenB) {
-        for (String factory : DexConstants.V3_FACTORIES) {
-            for (BigInteger fee : DexConstants.V3_FEE_TIERS) {
-                String key = buildV3PoolKey(tokenA, tokenB, fee);
-                if (v3PoolCache.containsKey(key)) {
-                    return Optional.ofNullable(v3PoolCache.get(key));
-                }
+    public List<PairMetadata> findOrCreateV3Pools(String tokenA, String tokenB) {
+        List<PairMetadata> pools = new ArrayList<>();
+        for (BigInteger fee : DexConstants.V3_FEE_TIERS) {
+            String key = buildV3PoolKey(tokenA, tokenB, fee);
+            PairMetadata cached = v3PoolCache.get(key);
+            if (cached != null) {
+                pools.add(cached);
+                continue;
+            }
+            for (String factory : DexConstants.V3_FACTORIES) {
                 Optional<PairMetadata> metadata = queryV3Pool(factory, tokenA, tokenB, fee);
                 if (metadata.isPresent()) {
                     PairMetadata pairMetadata = metadata.get();
                     v3PoolCache.put(key, pairMetadata);
                     v3PoolCache.put(buildV3PoolKey(tokenB, tokenA, fee), pairMetadata);
-                    return metadata;
+                    pools.add(pairMetadata);
+                    break;
                 }
             }
         }
-        return Optional.empty();
+        return pools;
+    }
+
+    public Optional<PairMetadata> findOrCreateV3Pool(String tokenA, String tokenB) {
+        return findOrCreateV3Pools(tokenA, tokenB).stream().findFirst();
     }
 
     /**

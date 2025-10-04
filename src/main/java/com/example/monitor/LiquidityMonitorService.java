@@ -137,14 +137,14 @@ public class LiquidityMonitorService {
                     subscribeMint(pair.pairAddress, pair.token0, pair.token1, MINT_EVENT_V2);
                     subscribeBurn(pair.pairAddress, pair.token0, pair.token1, BURN_EVENT_V2);
                 });
-        priceService.findOrCreateV3Pool(tokenAddress, DexConstants.BUSD_ADDRESS)
-                .ifPresent(pool -> {
+        priceService.findOrCreateV3Pools(tokenAddress, DexConstants.BUSD_ADDRESS)
+                .forEach(pool -> {
                     registerPool(pool.pairAddress, pool.token0, pool.token1, true);
                     subscribeMint(pool.pairAddress, pool.token0, pool.token1, MINT_EVENT_V3);
                     subscribeBurn(pool.pairAddress, pool.token0, pool.token1, BURN_EVENT_V3);
                 });
-        priceService.findOrCreateV3Pool(tokenAddress, DexConstants.WBNB_ADDRESS)
-                .ifPresent(pool -> {
+        priceService.findOrCreateV3Pools(tokenAddress, DexConstants.WBNB_ADDRESS)
+                .forEach(pool -> {
                     registerPool(pool.pairAddress, pool.token0, pool.token1, true);
                     subscribeMint(pool.pairAddress, pool.token0, pool.token1, MINT_EVENT_V3);
                     subscribeBurn(pool.pairAddress, pool.token0, pool.token1, BURN_EVENT_V3);
