@@ -512,6 +512,32 @@ public class DexPriceService {
     }
 
     /**
+     * 获取代币精度，若获取失败则返回默认 18
+     *
+     * @param tokenAddress 代币地址
+     * @return 精度
+     */
+    public BigInteger getTokenDecimals(String tokenAddress) {
+        if (tokenAddress == null) {
+            return BigInteger.valueOf(18);
+        }
+        return fetchDecimals(tokenAddress);
+    }
+
+    /**
+     * 获取代币符号，若获取失败则返回地址
+     *
+     * @param tokenAddress 代币地址
+     * @return 代币符号或地址
+     */
+    public String getTokenSymbol(String tokenAddress) {
+        if (tokenAddress == null) {
+            return "unknown";
+        }
+        return fetchSymbol(tokenAddress);
+    }
+
+    /**
      * 缓存池子元数据
      *
      * @param metadata      元数据
