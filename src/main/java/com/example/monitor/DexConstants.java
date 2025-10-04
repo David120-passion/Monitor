@@ -10,23 +10,23 @@ import java.util.List;
  */
 public class DexConstants {
     /** PancakeSwap V2 工厂地址 */
-    public static final String PANCAKE_V2_FACTORY = "0xBCfCcbde45cE874adCB698cC183deBcF17952812";
+    public static final String PANCAKE_V2_FACTORY = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73";
     /** PancakeSwap V3 工厂地址 */
-    public static final String PANCAKE_V3_FACTORY = "0xAf1114e0Ed5D9652CDd0F8B0FFe91c6c4e1e0DaC";
+    public static final String PANCAKE_V3_FACTORY = "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865";
     /** PancakeSwap V4 工厂地址（占位，若上线可替换真实地址） */
     public static final String PANCAKE_V4_FACTORY = "0x0000000000000000000000000000000000000000";
 
     /** Uniswap V2 工厂地址（BSC 部署） */
-    public static final String UNISWAP_V2_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
+    public static final String UNISWAP_V2_FACTORY = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6";
     /** Uniswap V3 工厂地址（BSC 部署占位） */
-    public static final String UNISWAP_V3_FACTORY = "0x1F98431c8aD98523631AE4a59f267346ea31F984";
+    public static final String UNISWAP_V3_FACTORY = "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7";
     /** Uniswap V4 工厂地址占位 */
     public static final String UNISWAP_V4_FACTORY = "0x0000000000000000000000000000000000000000";
-
+    //正式
     /** WBNB 代币地址 */
     public static final String WBNB_ADDRESS = "0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
     /** BUSD 代币地址 */
-    public static final String BUSD_ADDRESS = "0xe9e7cea3dedca5984780bafc599bd69add087d56";
+    public static final String USDT_ADDRESS = "0x55d398326f99059ff775485246999027b3197955";
 
     /** PancakeSwap V2 工厂列表 */
     public static final List<String> V2_FACTORIES = Collections.unmodifiableList(Arrays.asList(

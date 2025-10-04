@@ -92,14 +92,14 @@ public class DexPriceService {
      * @return 价格
      */
     public Optional<BigDecimal> getPriceAtBlock(BigInteger blockNumber) {
-        Optional<BigDecimal> directBusd = getBestPriceForPair(tokenAddress, DexConstants.BUSD_ADDRESS, blockNumber);
+        Optional<BigDecimal> directBusd = getBestPriceForPair(tokenAddress, DexConstants.USDT_ADDRESS, blockNumber);
         if (directBusd.isPresent()) {
             return directBusd.map(value -> value.setScale(8, RoundingMode.HALF_UP));
         }
 
         Optional<BigDecimal> viaWbnb = combinePrices(
                 getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, blockNumber),
-                getBestPriceForPair(DexConstants.WBNB_ADDRESS, DexConstants.BUSD_ADDRESS, blockNumber)
+                getBestPriceForPair(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, blockNumber)
         );
         if (viaWbnb.isPresent()) {
             return viaWbnb.map(value -> value.setScale(8, RoundingMode.HALF_UP));

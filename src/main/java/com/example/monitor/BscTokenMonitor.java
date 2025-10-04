@@ -16,7 +16,7 @@ public class BscTokenMonitor {
     /** 日志记录器 */
     private static final Logger log = LoggerFactory.getLogger(BscTokenMonitor.class);
     /** 默认 BSC RPC 节点（免费） */
-    private static final String DEFAULT_RPC_ENDPOINT = "https://bsc-dataseed.binance.org/";
+    private static final String DEFAULT_RPC_ENDPOINT = "https://bsc-mainnet.nodereal.io/v1/9613675572f24988819d24233504b290";
 
     /**
      * 程序入口函数
@@ -25,11 +25,7 @@ public class BscTokenMonitor {
      * @throws InterruptedException 中断异常
      */
     public static void main(String[] args) throws InterruptedException {
-        if (args.length == 0) {
-            log.error("Usage: java -jar <jar> <tokenAddress>");
-            return;
-        }
-        String tokenAddress = args[0];
+        String tokenAddress = "0xF8F331DFa811132c43C308757CD802ca982b7211";
         Web3j web3j = Web3j.build(new HttpService(DEFAULT_RPC_ENDPOINT));
         TokenInfoService tokenInfoService = new TokenInfoService(web3j);
         BigInteger decimals = tokenInfoService.loadDecimals(tokenAddress).orElse(BigInteger.valueOf(18));

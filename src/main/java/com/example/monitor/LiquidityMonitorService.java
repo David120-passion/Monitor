@@ -126,7 +126,7 @@ public class LiquidityMonitorService {
      * 手动注册初始池子
      */
     public void registerInitialPairs() {
-        priceService.findOrCreatePairs(tokenAddress, DexConstants.BUSD_ADDRESS)
+        priceService.findOrCreatePairs(tokenAddress, DexConstants.USDT_ADDRESS)
                 .forEach(pair -> {
                     registerPool(pair);
                     subscribeMint(pair, MINT_EVENT_V2);
@@ -138,7 +138,7 @@ public class LiquidityMonitorService {
                     subscribeMint(pair, MINT_EVENT_V2);
                     subscribeBurn(pair, BURN_EVENT_V2);
                 });
-        priceService.findOrCreateV3Pools(tokenAddress, DexConstants.BUSD_ADDRESS)
+        priceService.findOrCreateV3Pools(tokenAddress, DexConstants.USDT_ADDRESS)
                 .forEach(pool -> {
                     registerPool(pool);
                     subscribeMint(pool, MINT_EVENT_V3);
