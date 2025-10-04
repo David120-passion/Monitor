@@ -14,14 +14,14 @@ public class DexConstants {
     /** PancakeSwap V3 工厂地址 */
     public static final String PANCAKE_V3_FACTORY = "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865";
     /** PancakeSwap V4 工厂地址（占位，若上线可替换真实地址） */
-    public static final String PANCAKE_V4_FACTORY = "0x0000000000000000000000000000000000000000";
+    public static final String PANCAKE_V4_FACTORY = "0xa0ffb9c1ce1fe56963b0321b32e7a0302114058b";
 
     /** Uniswap V2 工厂地址（BSC 部署） */
     public static final String UNISWAP_V2_FACTORY = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6";
     /** Uniswap V3 工厂地址（BSC 部署占位） */
     public static final String UNISWAP_V3_FACTORY = "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7";
     /** Uniswap V4 工厂地址占位 */
-    public static final String UNISWAP_V4_FACTORY = "0x0000000000000000000000000000000000000000";
+    public static final String UNISWAP_V4_FACTORY = "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df";
     //正式
     /** WBNB 代币地址 */
     public static final String WBNB_ADDRESS = "0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
