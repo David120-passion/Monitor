@@ -114,20 +114,42 @@ public class TransferAggregator {
         private final BigDecimal usdValue;
         private final Direction direction;
 
+        /**
+         * 构造转账记录
+         *
+         * @param timestamp 时间戳
+         * @param usdValue  美元价值
+         * @param direction 买卖方向
+         */
         public TransferRecord(long timestamp, BigDecimal usdValue, Direction direction) {
             this.timestamp = timestamp;
             this.usdValue = usdValue;
             this.direction = direction;
         }
 
+        /**
+         * 获取时间戳
+         *
+         * @return 时间戳
+         */
         public long getTimestamp() {
             return timestamp;
         }
 
+        /**
+         * 获取美元价值
+         *
+         * @return 美元价值
+         */
         public BigDecimal getUsdValue() {
             return usdValue;
         }
 
+        /**
+         * 获取转账方向
+         *
+         * @return 方向
+         */
         public Direction getDirection() {
             return direction;
         }

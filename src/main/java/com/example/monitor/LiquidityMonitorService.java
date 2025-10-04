@@ -130,6 +130,8 @@ public class LiquidityMonitorService {
                     TypeReference.create(Int256.class),
                     TypeReference.create(Bytes32.class)
             ));
+    /** 零地址常量 */
+    private static final String ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
     /**
      * 构造函数
@@ -181,6 +183,16 @@ public class LiquidityMonitorService {
                     registerPool(pool);
                     subscribeMint(pool, MINT_EVENT_V3);
                     subscribeBurn(pool, BURN_EVENT_V3);
+                });
+        priceService.findOrCreateV4Pools(tokenAddress, DexConstants.USDT_ADDRESS)
+                .forEach(pool -> {
+                    registerPool(pool);
+                    cacheV4Metadata(pool);
+                });
+        priceService.findOrCreateV4Pools(tokenAddress, DexConstants.WBNB_ADDRESS)
+                .forEach(pool -> {
+                    registerPool(pool);
+                    cacheV4Metadata(pool);
                 });
     }
 
@@ -463,6 +475,11 @@ public class LiquidityMonitorService {
         }
     }
 
+    /**
+     * 处理 V4 Initialize 日志
+     *
+     * @param logEntry 日志数据
+     */
     private void handleV4InitializeLog(Log logEntry) {
         List<String> topics = logEntry.getTopics();
         if (topics.size() < 4) {
@@ -503,6 +520,11 @@ public class LiquidityMonitorService {
                 Instant.now());
     }
 
+    /**
+     * 处理 V4 ModifyLiquidity 日志
+     *
+     * @param logEntry 日志数据
+     */
     private void handleV4ModifyLiquidityLog(Log logEntry) {
         List<String> topics = logEntry.getTopics();
         if (topics.size() < 2) {
@@ -571,7 +593,7 @@ public class LiquidityMonitorService {
         String normalized = metadata.pairAddress.toLowerCase();
         if (registeredPools.add(normalized)) {
             transferMonitorService.addLiquidityPair(metadata.pairAddress);
-            if (metadata.poolType == DexPriceService.PoolType.V3) {
+            if (metadata.poolType == DexPriceService.PoolType.V3 || metadata.poolType == DexPriceService.PoolType.V4) {
                 log.info("POOL_REGISTERED pair={} name={} fee={}",
                         metadata.pairAddress,
                         metadata.getDisplayName(),
@@ -585,6 +607,33 @@ public class LiquidityMonitorService {
     }
 
     /**
+     * 缓存 V4 池子元数据，便于后续事件处理
+     *
+     * @param metadata 池子元数据
+     */
+    private void cacheV4Metadata(DexPriceService.PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return;
+        }
+        String poolId = formatPoolId(metadata.pairAddress);
+        String normalizedId = normalizePoolId(poolId);
+        v4Pools.computeIfAbsent(normalizedId, key -> new V4PoolMetadata(
+                poolId,
+                metadata.token0,
+                metadata.token1,
+                metadata.token0Decimals,
+                metadata.token1Decimals,
+                metadata.token0Symbol,
+                metadata.token1Symbol,
+                metadata.fee,
+                "0x",
+                ZERO_ADDRESS,
+                BigInteger.ZERO,
+                0
+        ));
+    }
+
+    /**
      * 解码地址
      */
     private String decodeAddress(String topic) {
@@ -595,10 +644,22 @@ public class LiquidityMonitorService {
         return "0x" + clean.substring(clean.length() - 40);
     }
 
+    /**
+     * 解码 V4 币种地址
+     *
+     * @param topic 主题数据
+     * @return 地址
+     */
     private String decodeCurrency(String topic) {
         return decodeAddress(topic);
     }
 
+    /**
+     * 规范化池子 ID
+     *
+     * @param topic 主题数据
+     * @return 池子 ID
+     */
     private String formatPoolId(String topic) {
         if (topic == null || topic.isEmpty()) {
             return "";
@@ -606,6 +667,12 @@ public class LiquidityMonitorService {
         return topic.startsWith("0x") ? topic : "0x" + topic;
     }
 
+    /**
+     * 标准化池子 ID（小写）
+     *
+     * @param poolId 池子 ID
+     * @return 标准化后的池子 ID
+     */
     private String normalizePoolId(String poolId) {
         if (poolId == null || poolId.isEmpty()) {
             return "";
@@ -613,6 +680,12 @@ public class LiquidityMonitorService {
         return formatPoolId(poolId).toLowerCase(Locale.ROOT);
     }
 
+    /**
+     * 判断地址是否为零地址
+     *
+     * @param address 地址
+     * @return 是否为零地址
+     */
     private boolean isZeroAddress(String address) {
         if (address == null) {
             return true;
@@ -629,12 +702,26 @@ public class LiquidityMonitorService {
         return true;
     }
 
+    /**
+     * 构造池子显示名称
+     *
+     * @param metadataOpt 元数据
+     * @param token0      token0 地址
+     * @param token1      token1 地址
+     * @return 显示名称
+     */
     private String formatPairName(Optional<DexPriceService.PairMetadata> metadataOpt, String token0, String token1) {
         return metadataOpt
                 .map(DexPriceService.PairMetadata::getDisplayName)
                 .orElse((token0 + "-" + token1).toLowerCase(Locale.ROOT));
     }
 
+    /**
+     * 格式化费率
+     *
+     * @param fee 费率数值
+     * @return 文本
+     */
     private String formatFee(BigInteger fee) {
         if (fee == null) {
             return "unknown";
@@ -644,12 +731,24 @@ public class LiquidityMonitorService {
         return normalized.toPlainString() + "%";
     }
 
+    /**
+     * 格式化价格区间
+     *
+     * @param rangeOpt 区间
+     * @return 文本
+     */
     private String formatPriceRange(Optional<DexPriceService.PriceRange> rangeOpt) {
         return rangeOpt
                 .map(range -> String.format("[%s, %s]", formatDecimal(range.lower), formatDecimal(range.upper)))
                 .orElse("[]");
     }
 
+    /**
+     * 格式化十进制数
+     *
+     * @param value 数值
+     * @return 文本
+     */
     private String formatDecimal(BigDecimal value) {
         BigDecimal scaled = value.setScale(6, RoundingMode.HALF_UP);
         BigDecimal normalized = scaled.stripTrailingZeros();
@@ -690,6 +789,22 @@ public class LiquidityMonitorService {
         private BigInteger sqrtPriceX96;
         private int lastTick;
 
+        /**
+         * 构造 V4 池子元数据
+         *
+         * @param poolId          池子 ID
+         * @param token0          token0 地址
+         * @param token1          token1 地址
+         * @param token0Decimals  token0 精度
+         * @param token1Decimals  token1 精度
+         * @param token0Symbol    token0 符号
+         * @param token1Symbol    token1 符号
+         * @param fee             池子费率
+         * @param parametersHex   池子参数
+         * @param hooks           钩子合约地址
+         * @param sqrtPriceX96    当前 sqrtPriceX96
+         * @param tick            当前 tick
+         */
         private V4PoolMetadata(String poolId,
                                String token0,
                                String token1,
@@ -722,41 +837,82 @@ public class LiquidityMonitorService {
                     token1Decimals,
                     token0Symbol,
                     token1Symbol,
-                    DexPriceService.PoolType.V3,
+                    DexPriceService.PoolType.V4,
                     fee
             );
         }
 
+        /**
+         * 获取显示名称
+         *
+         * @return 显示名称
+         */
         private String getDisplayName() {
             String symbol0 = getSymbol0OrAddress();
             String symbol1 = getSymbol1OrAddress();
             return symbol0.toLowerCase(Locale.ROOT) + "-" + symbol1.toLowerCase(Locale.ROOT);
         }
 
+        /**
+         * 获取 token0 的符号或地址
+         *
+         * @return token0 标识
+         */
         private String getSymbol0OrAddress() {
             return token0Symbol != null ? token0Symbol : token0;
         }
 
+        /**
+         * 获取 token1 的符号或地址
+         *
+         * @return token1 标识
+         */
         private String getSymbol1OrAddress() {
             return token1Symbol != null ? token1Symbol : token1;
         }
 
+        /**
+         * 获取 token0 地址
+         *
+         * @return token0 地址
+         */
         private String getToken0() {
             return token0;
         }
 
+        /**
+         * 获取 token1 地址
+         *
+         * @return token1 地址
+         */
         private String getToken1() {
             return token1;
         }
 
+        /**
+         * 获取费率
+         *
+         * @return 费率
+         */
         private BigInteger getFee() {
             return fee;
         }
 
+        /**
+         * 转换为价格服务的元数据
+         *
+         * @return 池子元数据
+         */
         private DexPriceService.PairMetadata asPairMetadata() {
             return pairMetadata;
         }
 
+        /**
+         * 更新 slot0 数据
+         *
+         * @param sqrtPriceX96 新的 sqrtPriceX96
+         * @param tick         新的 tick
+         */
         private void updateSlot(BigInteger sqrtPriceX96, int tick) {
             this.sqrtPriceX96 = sqrtPriceX96;
             this.lastTick = tick;
