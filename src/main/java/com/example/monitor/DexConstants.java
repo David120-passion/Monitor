@@ -1,5 +1,6 @@
 package com.example.monitor;
 
+import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -37,6 +38,14 @@ public class DexConstants {
     public static final List<String> V3_FACTORIES = Collections.unmodifiableList(Arrays.asList(
             PANCAKE_V3_FACTORY,
             UNISWAP_V3_FACTORY
+    ));
+
+    /** V3 可用费率列表（以 1e-6 计） */
+    public static final List<BigInteger> V3_FEE_TIERS = Collections.unmodifiableList(Arrays.asList(
+            BigInteger.valueOf(100),      // 0.01%
+            BigInteger.valueOf(500),      // 0.05%
+            BigInteger.valueOf(2500),     // 0.25%
+            BigInteger.valueOf(10000)     // 1%
     ));
 
     /** PancakeSwap V4 工厂列表 */

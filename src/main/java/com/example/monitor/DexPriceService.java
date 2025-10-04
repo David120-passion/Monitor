@@ -9,6 +9,7 @@ import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Function;
 import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Uint112;
+import org.web3j.abi.datatypes.generated.Uint24;
 import org.web3j.abi.datatypes.generated.Uint32;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
@@ -39,8 +40,12 @@ public class DexPriceService {
     /** 代币符号 */
     private final String tokenSymbol;
 
-    /** 缓存的 V2 配对信息 */
-    private final Map<String, PairMetadata> pairCache = new ConcurrentHashMap<>();
+    /** 按 token 组合缓存的 V2 配对信息 */
+    private final Map<String, PairMetadata> pairCacheByTokens = new ConcurrentHashMap<>();
+    /** 按地址缓存的池子信息 */
+    private final Map<String, PairMetadata> pairCacheByAddress = new ConcurrentHashMap<>();
+    /** 按 token 与费率缓存的 V3 池子信息 */
+    private final Map<String, PairMetadata> v3PoolCache = new ConcurrentHashMap<>();
 
     /**
      * 构造函数
@@ -159,15 +164,40 @@ public class DexPriceService {
      */
     public Optional<PairMetadata> findOrCreatePair(String tokenA, String tokenB) {
         String key = buildPairKey(tokenA, tokenB);
-        if (pairCache.containsKey(key)) {
-            return Optional.of(pairCache.get(key));
+        if (pairCacheByTokens.containsKey(key)) {
+            return Optional.of(pairCacheByTokens.get(key));
         }
         for (String factory : DexConstants.V2_FACTORIES) {
             Optional<PairMetadata> metadata = queryPair(factory, tokenA, tokenB);
             if (metadata.isPresent()) {
-                pairCache.put(key, metadata.get());
-                pairCache.put(buildPairKey(tokenB, tokenA), metadata.get());
+                cachePairMetadata(metadata.get(), true);
                 return metadata;
+            }
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * 查找或创建 V3 池子信息
+     *
+     * @param tokenA 代币 A
+     * @param tokenB 代币 B
+     * @return 池子信息
+     */
+    public Optional<PairMetadata> findOrCreateV3Pool(String tokenA, String tokenB) {
+        for (String factory : DexConstants.V3_FACTORIES) {
+            for (BigInteger fee : DexConstants.V3_FEE_TIERS) {
+                String key = buildV3PoolKey(tokenA, tokenB, fee);
+                if (v3PoolCache.containsKey(key)) {
+                    return Optional.ofNullable(v3PoolCache.get(key));
+                }
+                Optional<PairMetadata> metadata = queryV3Pool(factory, tokenA, tokenB, fee);
+                if (metadata.isPresent()) {
+                    PairMetadata pairMetadata = metadata.get();
+                    v3PoolCache.put(key, pairMetadata);
+                    v3PoolCache.put(buildV3PoolKey(tokenB, tokenA, fee), pairMetadata);
+                    return metadata;
+                }
             }
         }
         return Optional.empty();
@@ -203,7 +233,7 @@ public class DexPriceService {
             if (isZeroAddress(pairAddress)) {
                 return Optional.empty();
             }
-            return loadPairMetadata(pairAddress);
+            return loadPairMetadata(pairAddress, true);
         } catch (IOException e) {
             log.error("Failed to query pair from factory {}", factory, e);
             return Optional.empty();
@@ -217,6 +247,25 @@ public class DexPriceService {
      * @return 元数据
      */
     public Optional<PairMetadata> loadPairMetadata(String pairAddress) {
+        return loadPairMetadata(pairAddress, true);
+    }
+
+    /**
+     * 加载池子元数据
+     *
+     * @param pairAddress   池子地址
+     * @param cacheByTokens 是否按 token 组合缓存
+     * @return 元数据
+     */
+    public Optional<PairMetadata> loadPairMetadata(String pairAddress, boolean cacheByTokens) {
+        String normalizedAddress = normalize(pairAddress);
+        if (pairCacheByAddress.containsKey(normalizedAddress)) {
+            PairMetadata metadata = pairCacheByAddress.get(normalizedAddress);
+            if (cacheByTokens) {
+                cachePairMetadata(metadata, true);
+            }
+            return Optional.of(metadata);
+        }
         try {
             String token0 = callAddressFunction(pairAddress, "token0");
             String token1 = callAddressFunction(pairAddress, "token1");
@@ -226,12 +275,28 @@ public class DexPriceService {
             BigInteger token0Decimals = fetchDecimals(token0);
             BigInteger token1Decimals = fetchDecimals(token1);
             PairMetadata metadata = new PairMetadata(pairAddress, token0, token1, token0Decimals, token1Decimals);
-            pairCache.put(buildPairKey(token0, token1), metadata);
-            pairCache.put(buildPairKey(token1, token0), metadata);
+            cachePairMetadata(metadata, cacheByTokens);
             return Optional.of(metadata);
         } catch (IOException e) {
             log.error("Failed to load pair metadata for {}", pairAddress, e);
             return Optional.empty();
+        }
+    }
+
+    /**
+     * 缓存池子元数据
+     *
+     * @param metadata      元数据
+     * @param cacheByTokens 是否按 token 缓存
+     */
+    private void cachePairMetadata(PairMetadata metadata, boolean cacheByTokens) {
+        if (metadata == null) {
+            return;
+        }
+        pairCacheByAddress.put(normalize(metadata.pairAddress), metadata);
+        if (cacheByTokens) {
+            pairCacheByTokens.put(buildPairKey(metadata.token0, metadata.token1), metadata);
+            pairCacheByTokens.put(buildPairKey(metadata.token1, metadata.token0), metadata);
         }
     }
 
@@ -286,6 +351,18 @@ public class DexPriceService {
     }
 
     /**
+     * 构建 V3 池子缓存键
+     *
+     * @param tokenA 代币 A
+     * @param tokenB 代币 B
+     * @param fee    费率
+     * @return 键值
+     */
+    private String buildV3PoolKey(String tokenA, String tokenB, BigInteger fee) {
+        return buildPairKey(tokenA, tokenB) + ":" + fee.toString();
+    }
+
+    /**
      * 地址归一化（小写）
      *
      * @param address 地址
@@ -293,6 +370,44 @@ public class DexPriceService {
      */
     private String normalize(String address) {
         return address == null ? null : address.toLowerCase();
+    }
+
+    /**
+     * 查询 V3 工厂获得池子
+     *
+     * @param factory 工厂地址
+     * @param tokenA  代币 A
+     * @param tokenB  代币 B
+     * @param fee     费率
+     * @return 池子信息
+     */
+    private Optional<PairMetadata> queryV3Pool(String factory, String tokenA, String tokenB, BigInteger fee) {
+        Function function = new Function(
+                "getPool",
+                Arrays.asList(new Address(normalize(tokenA)), new Address(normalize(tokenB)), new Uint24(fee)),
+                Collections.singletonList(new TypeReference<Address>() {
+                })
+        );
+        String encodedFunction = FunctionEncoder.encode(function);
+        Transaction tx = Transaction.createEthCallTransaction(null, factory, encodedFunction);
+        try {
+            EthCall response = web3j.ethCall(tx, DefaultBlockParameterName.LATEST).send();
+            if (response.isReverted()) {
+                return Optional.empty();
+            }
+            List<Type> values = FunctionReturnDecoder.decode(response.getValue(), function.getOutputParameters());
+            if (values.isEmpty()) {
+                return Optional.empty();
+            }
+            String poolAddress = values.get(0).getValue().toString();
+            if (isZeroAddress(poolAddress)) {
+                return Optional.empty();
+            }
+            return loadPairMetadata(poolAddress, false);
+        } catch (IOException e) {
+            log.error("Failed to query V3 pool from factory {} with fee {}", factory, fee, e);
+            return Optional.empty();
+        }
     }
 
     /**

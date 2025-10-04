@@ -127,15 +127,27 @@ public class LiquidityMonitorService {
     public void registerInitialPairs() {
         priceService.findOrCreatePair(tokenAddress, DexConstants.BUSD_ADDRESS)
                 .ifPresent(pair -> {
-                    registerPool(pair.pairAddress, pair.token0, pair.token1);
+                    registerPool(pair.pairAddress, pair.token0, pair.token1, false);
                     subscribeMint(pair.pairAddress, pair.token0, pair.token1, MINT_EVENT_V2);
                     subscribeBurn(pair.pairAddress, pair.token0, pair.token1, BURN_EVENT_V2);
                 });
         priceService.findOrCreatePair(tokenAddress, DexConstants.WBNB_ADDRESS)
                 .ifPresent(pair -> {
-                    registerPool(pair.pairAddress, pair.token0, pair.token1);
+                    registerPool(pair.pairAddress, pair.token0, pair.token1, false);
                     subscribeMint(pair.pairAddress, pair.token0, pair.token1, MINT_EVENT_V2);
                     subscribeBurn(pair.pairAddress, pair.token0, pair.token1, BURN_EVENT_V2);
+                });
+        priceService.findOrCreateV3Pool(tokenAddress, DexConstants.BUSD_ADDRESS)
+                .ifPresent(pool -> {
+                    registerPool(pool.pairAddress, pool.token0, pool.token1, true);
+                    subscribeMint(pool.pairAddress, pool.token0, pool.token1, MINT_EVENT_V3);
+                    subscribeBurn(pool.pairAddress, pool.token0, pool.token1, BURN_EVENT_V3);
+                });
+        priceService.findOrCreateV3Pool(tokenAddress, DexConstants.WBNB_ADDRESS)
+                .ifPresent(pool -> {
+                    registerPool(pool.pairAddress, pool.token0, pool.token1, true);
+                    subscribeMint(pool.pairAddress, pool.token0, pool.token1, MINT_EVENT_V3);
+                    subscribeBurn(pool.pairAddress, pool.token0, pool.token1, BURN_EVENT_V3);
                 });
     }
 
@@ -174,7 +186,7 @@ public class LiquidityMonitorService {
                 String pairAddress = data.get(0).getValue().toString();
                 BigInteger liquidity = (BigInteger) data.get(1).getValue();
                 if (matchesTarget(token0, token1)) {
-                    registerPool(pairAddress, token0, token1);
+                    registerPool(pairAddress, token0, token1, false);
                     log.info("PAIR_CREATED pair={} token0={} token1={} liquidity={} time={}", pairAddress, token0, token1, liquidity,
                             Instant.now());
                     subscribeMint(pairAddress, token0, token1, MINT_EVENT_V2);
@@ -194,7 +206,7 @@ public class LiquidityMonitorService {
                 BigInteger tickSpacing = (BigInteger) data.get(1).getValue();
                 String poolAddress = data.get(2).getValue().toString();
                 if (matchesTarget(token0, token1)) {
-                    registerPool(poolAddress, token0, token1);
+                    registerPool(poolAddress, token0, token1, true);
                     log.info("POOL_CREATED pool={} token0={} token1={} fee={} tickSpacing={} time={}",
                             poolAddress, token0, token1, fee, tickSpacing, Instant.now());
                     subscribeMint(poolAddress, token0, token1, MINT_EVENT_V3);
@@ -261,7 +273,7 @@ public class LiquidityMonitorService {
      */
     private void handleBurnLog(String pairAddress, String token0, String token1, Event event, Log logEntry) {
         try {
-            Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress);
+            Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress, event.equals(BURN_EVENT_V2));
             if (event.equals(BURN_EVENT_V2)) {
                 List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
                 if (data.size() < 2) {
@@ -324,7 +336,7 @@ public class LiquidityMonitorService {
                 }
                 BigInteger amount0 = (BigInteger) data.get(0).getValue();
                 BigInteger amount1 = (BigInteger) data.get(1).getValue();
-                Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress);
+                Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress, event.equals(MINT_EVENT_V2));
                 BigDecimal normalized0 = normalizeAmount(amount0, metadataOpt, true);
                 BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
                 String sender = logEntry.getTopics().size() > 1 ? decodeAddress(logEntry.getTopics().get(1)) : "";
@@ -339,7 +351,7 @@ public class LiquidityMonitorService {
                 BigInteger liquidity = (BigInteger) data.get(1).getValue();
                 BigInteger amount0 = (BigInteger) data.get(2).getValue();
                 BigInteger amount1 = (BigInteger) data.get(3).getValue();
-                Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress);
+                Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress, false);
                 BigDecimal normalized0 = normalizeAmount(amount0, metadataOpt, true);
                 BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
                 String owner = logEntry.getTopics().size() > 1 ? decodeAddress(logEntry.getTopics().get(1)) : "";
@@ -371,11 +383,11 @@ public class LiquidityMonitorService {
      * @param token0      token0 地址
      * @param token1      token1 地址
      */
-    private void registerPool(String pairAddress, String token0, String token1) {
+    private void registerPool(String pairAddress, String token0, String token1, boolean isV3) {
         if (pairAddress == null) {
             return;
         }
-        priceService.loadPairMetadata(pairAddress);
+        priceService.loadPairMetadata(pairAddress, !isV3);
         String normalized = pairAddress.toLowerCase();
         if (registeredPools.add(normalized)) {
             transferMonitorService.addLiquidityPair(pairAddress);
