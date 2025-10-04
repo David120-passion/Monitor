@@ -498,23 +498,28 @@ public class DexPriceService {
      */
     public List<PairMetadata> findOrCreateV4Pools(String tokenA, String tokenB) {
         List<PairMetadata> pools = new ArrayList<>();
-        for (BigInteger fee : DexConstants.V3_FEE_TIERS) {
-            String key = buildV4PoolKey(tokenA, tokenB, fee);
-            PairMetadata cached = v4PoolCache.get(key);
-            if (cached != null) {
-                pools.add(cached);
+        Set<String> seenAddresses = ConcurrentHashMap.newKeySet();
+
+        String cacheKey = buildV4PoolKey(tokenA, tokenB);
+        PairMetadata cached = v4PoolCache.get(cacheKey);
+        if (cached != null) {
+            pools.add(cached);
+            seenAddresses.add(normalize(cached.pairAddress));
+        }
+
+        for (String factory : DexConstants.V4_FACTORIES) {
+            Optional<PairMetadata> metadata = queryV4Pool(factory, tokenA, tokenB);
+            if (!metadata.isPresent()) {
                 continue;
             }
-            for (String factory : DexConstants.V4_FACTORIES) {
-                Optional<PairMetadata> metadata = queryV4Pool(factory, tokenA, tokenB, fee);
-                if (metadata.isPresent()) {
-                    PairMetadata pairMetadata = metadata.get();
-                    v4PoolCache.put(key, pairMetadata);
-                    v4PoolCache.put(buildV4PoolKey(tokenB, tokenA, fee), pairMetadata);
-                    pools.add(pairMetadata);
-                    break;
-                }
+            PairMetadata pairMetadata = metadata.get();
+            String normalizedAddress = normalize(pairMetadata.pairAddress);
+            if (!seenAddresses.add(normalizedAddress)) {
+                continue;
             }
+            pools.add(pairMetadata);
+            v4PoolCache.put(buildV4PoolKey(tokenA, tokenB), pairMetadata);
+            v4PoolCache.put(buildV4PoolKey(tokenB, tokenA), pairMetadata);
         }
         return pools;
     }
@@ -831,11 +836,10 @@ public class DexPriceService {
      *
      * @param tokenA 代币 A
      * @param tokenB 代币 B
-     * @param fee    费率
      * @return 键值
      */
-    private String buildV4PoolKey(String tokenA, String tokenB, BigInteger fee) {
-        return "v4:" + buildPairKey(tokenA, tokenB) + ":" + fee.toString();
+    private String buildV4PoolKey(String tokenA, String tokenB) {
+        return "v4:" + buildPairKey(tokenA, tokenB);
     }
 
     /**
@@ -854,7 +858,6 @@ public class DexPriceService {
      * @param factory 工厂地址
      * @param tokenA  代币 A
      * @param tokenB  代币 B
-     * @param fee     费率
      * @return 池子信息
      */
     private Optional<PairMetadata> queryV3Pool(String factory, String tokenA, String tokenB, BigInteger fee) {
@@ -892,19 +895,34 @@ public class DexPriceService {
      * @param factory 工厂地址
      * @param tokenA  代币 A
      * @param tokenB  代币 B
-     * @param fee     费率
      * @return 池子信息
      */
-    private Optional<PairMetadata> queryV4Pool(String factory, String tokenA, String tokenB, BigInteger fee) {
+    private Optional<PairMetadata> queryV4Pool(String factory, String tokenA, String tokenB) {
         if (factory == null || isZeroAddress(factory)) {
             return Optional.empty();
+        }
+        String normalizedTokenA = normalize(tokenA);
+        String normalizedTokenB = normalize(tokenB);
+        if (normalizedTokenA == null || normalizedTokenB == null) {
+            return Optional.empty();
+        }
+        String token0 = normalizedTokenA;
+        String token1 = normalizedTokenB;
+        try {
+            BigInteger aInt = Numeric.toBigInt(normalizedTokenA);
+            BigInteger bInt = Numeric.toBigInt(normalizedTokenB);
+            if (aInt.compareTo(bInt) > 0) {
+                token0 = normalizedTokenB;
+                token1 = normalizedTokenA;
+            }
+        } catch (NumberFormatException ex) {
+            log.warn("Failed to sort V4 tokens {} and {}", tokenA, tokenB, ex);
         }
         Function function = new Function(
                 "getPool",
                 Arrays.asList(
-                        new Address(normalize(tokenA)),
-                        new Address(normalize(tokenB)),
-                        new Uint24(fee),
+                        new Address(token0),
+                        new Address(token1),
                         new Address(ZERO_ADDRESS),
                         EMPTY_BYTES32
                 ),
@@ -926,9 +944,9 @@ public class DexPriceService {
             if (isZeroAddress(poolAddress)) {
                 return Optional.empty();
             }
-            return loadPairMetadata(poolAddress, false, PoolType.V4, fee);
+            return loadPairMetadata(poolAddress, false, PoolType.V4, null);
         } catch (IOException e) {
-            log.error("Failed to query V4 pool from factory {} with fee {}", factory, fee, e);
+            log.error("Failed to query V4 pool from factory {}", factory, e);
             return Optional.empty();
         }
     }
