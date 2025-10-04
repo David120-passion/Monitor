@@ -30,12 +30,18 @@ public class BscTokenMonitor {
         TokenInfoService tokenInfoService = new TokenInfoService(web3j);
         BigInteger decimals = tokenInfoService.loadDecimals(tokenAddress).orElse(BigInteger.valueOf(18));
         String symbol = tokenInfoService.loadSymbol(tokenAddress).orElse("TOKEN");
+        Optional<BigInteger> creationBlockOpt = tokenInfoService.findCreationBlock(tokenAddress);
+        if (creationBlockOpt.isPresent()) {
+            log.info("Detected token creation block={} for token={}", creationBlockOpt.get(), tokenAddress);
+        } else {
+            log.warn("Unable to determine creation block for token={}, defaulting to earliest block", tokenAddress);
+        }
         log.info("Starting monitor for token={} decimals={}", symbol, decimals);
 
         DexPriceService priceService = new DexPriceService(web3j, tokenAddress, decimals, symbol);
         TransferAggregator aggregator = new TransferAggregator();
         TransferMonitorService transferMonitorService = new TransferMonitorService(web3j, tokenAddress, decimals, symbol, priceService, aggregator);
-        LiquidityMonitorService liquidityMonitorService = new LiquidityMonitorService(web3j, tokenAddress, priceService, transferMonitorService);
+        LiquidityMonitorService liquidityMonitorService = new LiquidityMonitorService(web3j, tokenAddress, priceService, transferMonitorService, creationBlockOpt.orElse(null));
 
         liquidityMonitorService.registerInitialPairs();
         liquidityMonitorService.start();

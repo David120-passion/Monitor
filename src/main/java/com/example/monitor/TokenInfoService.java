@@ -10,9 +10,11 @@ import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.Utf8String;
 import org.web3j.abi.datatypes.generated.Uint8;
 import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.request.Transaction;
 import org.web3j.protocol.core.methods.response.EthCall;
+import org.web3j.protocol.core.methods.response.EthGetCode;
 
 import java.io.IOException;
 import java.math.BigInteger;
@@ -74,6 +76,64 @@ public class TokenInfoService {
         return callSingleValueReturn(tokenAddress, function)
                 .map(value -> (Utf8String) value)
                 .map(Utf8String::getValue);
+    }
+
+    /**
+     * 查找代币合约的创建区块
+     *
+     * @param tokenAddress 代币合约地址
+     * @return 创建区块高度
+     */
+    public Optional<BigInteger> findCreationBlock(String tokenAddress) {
+        try {
+            BigInteger latestBlock = web3j.ethBlockNumber().send().getBlockNumber();
+            if (latestBlock == null) {
+                return Optional.empty();
+            }
+            BigInteger low = BigInteger.ZERO;
+            BigInteger high = latestBlock;
+            BigInteger creationBlock = null;
+            while (low.compareTo(high) <= 0) {
+                BigInteger mid = low.add(high).shiftRight(1);
+                if (hasContractCodeAtBlock(tokenAddress, mid)) {
+                    creationBlock = mid;
+                    if (mid.equals(BigInteger.ZERO)) {
+                        break;
+                    }
+                    high = mid.subtract(BigInteger.ONE);
+                } else {
+                    low = mid.add(BigInteger.ONE);
+                }
+            }
+            return Optional.ofNullable(creationBlock);
+        } catch (IOException e) {
+            log.error("Failed to determine creation block for token {}", tokenAddress, e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 判断指定区块是否已经存在合约代码
+     *
+     * @param contractAddress 合约地址
+     * @param blockNumber     区块高度
+     * @return 是否存在代码
+     * @throws IOException RPC 调用异常
+     */
+    private boolean hasContractCodeAtBlock(String contractAddress, BigInteger blockNumber) throws IOException {
+        EthGetCode codeResponse = web3j.ethGetCode(contractAddress, DefaultBlockParameter.valueOf(blockNumber)).send();
+        if (codeResponse == null) {
+            return false;
+        }
+        if (codeResponse.hasError()) {
+            log.warn("eth_getCode returned error for contract={} block={} error={}",
+                    contractAddress,
+                    blockNumber,
+                    codeResponse.getError());
+            return false;
+        }
+        String code = codeResponse.getCode();
+        return code != null && !code.equalsIgnoreCase("0x") && !code.equalsIgnoreCase("0X");
     }
 
     /**

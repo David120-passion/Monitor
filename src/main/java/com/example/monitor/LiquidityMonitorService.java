@@ -19,6 +19,7 @@ import org.web3j.abi.datatypes.generated.Uint24;
 import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.crypto.Hash;
 import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.Log;
@@ -58,6 +59,8 @@ public class LiquidityMonitorService {
     private final ConcurrentHashMap<String, V4PoolMetadata> v4Pools = new ConcurrentHashMap<>();
     /** 已订阅 V4 ModifyLiquidity 事件的池子集合 */
     private final Set<String> v4SubscribedPools = ConcurrentHashMap.newKeySet();
+    /** 代币创建区块 */
+    private final BigInteger tokenCreationBlock;
 
     /** V2 PairCreated 事件 */
     private static final Event PAIR_CREATED_EVENT = new Event("PairCreated",
@@ -141,11 +144,12 @@ public class LiquidityMonitorService {
      * 构造函数
      */
     public LiquidityMonitorService(Web3j web3j, String tokenAddress, DexPriceService priceService,
-                                   TransferMonitorService transferMonitorService) {
+                                   TransferMonitorService transferMonitorService, BigInteger tokenCreationBlock) {
         this.web3j = web3j;
         this.tokenAddress = tokenAddress.toLowerCase();
         this.priceService = priceService;
         this.transferMonitorService = transferMonitorService;
+        this.tokenCreationBlock = tokenCreationBlock;
     }
 
     /**
@@ -201,7 +205,7 @@ public class LiquidityMonitorService {
     }
 
     private void subscribeV4Factory(String factoryAddress) {
-        EthFilter initFilter = new EthFilter(DefaultBlockParameterName.EARLIEST, DefaultBlockParameterName.LATEST, factoryAddress);
+        EthFilter initFilter = new EthFilter(getV4StartBlockParameter(), DefaultBlockParameterName.LATEST, factoryAddress);
         initFilter.addSingleTopic(EventEncoder.encode(INITIALIZE_EVENT_V4));
         web3j.ethLogFlowable(initFilter).subscribe(logEntry -> handleV4InitializeLog(factoryAddress, logEntry), throwable ->
                 log.error("Error processing V4 initialize event", throwable));
@@ -347,7 +351,7 @@ public class LiquidityMonitorService {
         if (!v4SubscribedPools.add(normalizedKey)) {
             return;
         }
-        EthFilter modifyFilter = new EthFilter(DefaultBlockParameterName.EARLIEST, DefaultBlockParameterName.LATEST, factoryAddress);
+        EthFilter modifyFilter = new EthFilter(getV4StartBlockParameter(), DefaultBlockParameterName.LATEST, factoryAddress);
         modifyFilter.addSingleTopic(EventEncoder.encode(MODIFY_LIQUIDITY_EVENT_V4));
         modifyFilter.addOptionalTopics(normalizedPoolId);
         web3j.ethLogFlowable(modifyFilter).subscribe(logEntry -> handleV4ModifyLiquidityLog(logEntry), throwable ->
@@ -701,6 +705,13 @@ public class LiquidityMonitorService {
             clean = "0x" + clean;
         }
         return clean;
+    }
+
+    private DefaultBlockParameter getV4StartBlockParameter() {
+        if (tokenCreationBlock != null && tokenCreationBlock.signum() >= 0) {
+            return DefaultBlockParameter.valueOf(tokenCreationBlock);
+        }
+        return DefaultBlockParameterName.EARLIEST;
     }
 
     private BigDecimal normalizeV4Amount(BigInteger rawAmount, BigInteger decimals) {
