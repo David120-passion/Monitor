@@ -66,12 +66,22 @@ public class LiquidityMonitorService {
                     TypeReference.create(Address.class)
             ));
     /** V2 Burn 事件 */
-    private static final Event BURN_EVENT = new Event("Burn",
+    private static final Event BURN_EVENT_V2 = new Event("Burn",
             Arrays.asList(
                     TypeReference.create(Address.class, true),
                     TypeReference.create(Uint256.class),
                     TypeReference.create(Uint256.class),
                     TypeReference.create(Address.class, true)
+            ));
+    /** V3 Burn 事件 */
+    private static final Event BURN_EVENT_V3 = new Event("Burn",
+            Arrays.asList(
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Int24.class, true),
+                    TypeReference.create(Int24.class, true),
+                    TypeReference.create(Uint128.class),
+                    TypeReference.create(Uint256.class),
+                    TypeReference.create(Uint256.class)
             ));
     /** V2 Mint 事件 */
     private static final Event MINT_EVENT_V2 = new Event("Mint",
@@ -119,13 +129,13 @@ public class LiquidityMonitorService {
                 .ifPresent(pair -> {
                     registerPool(pair.pairAddress, pair.token0, pair.token1);
                     subscribeMint(pair.pairAddress, pair.token0, pair.token1, MINT_EVENT_V2);
-                    subscribeBurn(pair.pairAddress, pair.token0, pair.token1);
+                    subscribeBurn(pair.pairAddress, pair.token0, pair.token1, BURN_EVENT_V2);
                 });
         priceService.findOrCreatePair(tokenAddress, DexConstants.WBNB_ADDRESS)
                 .ifPresent(pair -> {
                     registerPool(pair.pairAddress, pair.token0, pair.token1);
                     subscribeMint(pair.pairAddress, pair.token0, pair.token1, MINT_EVENT_V2);
-                    subscribeBurn(pair.pairAddress, pair.token0, pair.token1);
+                    subscribeBurn(pair.pairAddress, pair.token0, pair.token1, BURN_EVENT_V2);
                 });
     }
 
@@ -168,7 +178,7 @@ public class LiquidityMonitorService {
                     log.info("PAIR_CREATED pair={} token0={} token1={} liquidity={} time={}", pairAddress, token0, token1, liquidity,
                             Instant.now());
                     subscribeMint(pairAddress, token0, token1, MINT_EVENT_V2);
-                    subscribeBurn(pairAddress, token0, token1);
+                    subscribeBurn(pairAddress, token0, token1, BURN_EVENT_V2);
                 }
             } else if (event.equals(POOL_CREATED_EVENT)) {
                 if (topics.size() < 3) {
@@ -188,7 +198,7 @@ public class LiquidityMonitorService {
                     log.info("POOL_CREATED pool={} token0={} token1={} fee={} tickSpacing={} time={}",
                             poolAddress, token0, token1, fee, tickSpacing, Instant.now());
                     subscribeMint(poolAddress, token0, token1, MINT_EVENT_V3);
-                    subscribeBurn(poolAddress, token0, token1);
+                    subscribeBurn(poolAddress, token0, token1, BURN_EVENT_V3);
                 }
             }
         } catch (Exception ex) {
@@ -203,17 +213,18 @@ public class LiquidityMonitorService {
      * @param token0      token0 地址
      * @param token1      token1 地址
      */
-    private void subscribeBurn(String pairAddress, String token0, String token1) {
-        if (pairAddress == null) {
+    private void subscribeBurn(String pairAddress, String token0, String token1, Event event) {
+        if (pairAddress == null || event == null) {
             return;
         }
-        String normalized = pairAddress.toLowerCase();
+        String eventTopic = EventEncoder.encode(event);
+        String normalized = pairAddress.toLowerCase() + ":" + eventTopic;
         if (!burnSubscribedPools.add(normalized)) {
             return;
         }
         EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, pairAddress);
-        filter.addSingleTopic(EventEncoder.encode(BURN_EVENT));
-        web3j.ethLogFlowable(filter).subscribe(logEntry -> handleBurnLog(pairAddress, token0, token1, logEntry), throwable ->
+        filter.addSingleTopic(eventTopic);
+        web3j.ethLogFlowable(filter).subscribe(logEntry -> handleBurnLog(pairAddress, token0, token1, event, logEntry), throwable ->
                 log.error("Error processing burn event", throwable));
     }
 
@@ -248,20 +259,47 @@ public class LiquidityMonitorService {
      * @param token1      token1 地址
      * @param logEntry    日志
      */
-    private void handleBurnLog(String pairAddress, String token0, String token1, Log logEntry) {
+    private void handleBurnLog(String pairAddress, String token0, String token1, Event event, Log logEntry) {
         try {
-            List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), BURN_EVENT.getNonIndexedParameters());
-            if (data.size() < 2) {
-                return;
-            }
-            BigInteger amount0 = (BigInteger) data.get(0).getValue();
-            BigInteger amount1 = (BigInteger) data.get(1).getValue();
             Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress);
-            BigDecimal normalized0 = normalizeAmount(amount0, metadataOpt, true);
-            BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
-            log.info("POOL_REMOVED pair={} amount0={} amount1={} time={}", pairAddress, normalized0, normalized1, Instant.now());
-            if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
-                transferMonitorService.removeLiquidityPair(pairAddress);
+            if (event.equals(BURN_EVENT_V2)) {
+                List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
+                if (data.size() < 2) {
+                    return;
+                }
+                BigInteger amount0 = (BigInteger) data.get(0).getValue();
+                BigInteger amount1 = (BigInteger) data.get(1).getValue();
+                BigDecimal normalized0 = normalizeAmount(amount0, metadataOpt, true);
+                BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
+                String sender = logEntry.getTopics().size() > 1 ? decodeAddress(logEntry.getTopics().get(1)) : "";
+                String to = logEntry.getTopics().size() > 2 ? decodeAddress(logEntry.getTopics().get(2)) : "";
+                log.info("POOL_REMOVED pair={} sender={} to={} token0={} token1={} amount0={} amount1={} time={}",
+                        pairAddress, sender, to, token0, token1, normalized0, normalized1, Instant.now());
+                if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
+                    transferMonitorService.removeLiquidityPair(pairAddress);
+                }
+            } else if (event.equals(BURN_EVENT_V3)) {
+                List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
+                if (data.size() < 3) {
+                    return;
+                }
+                BigInteger burnedLiquidity = (BigInteger) data.get(0).getValue();
+                BigInteger amount0 = (BigInteger) data.get(1).getValue();
+                BigInteger amount1 = (BigInteger) data.get(2).getValue();
+                BigDecimal normalized0 = normalizeAmount(amount0, metadataOpt, true);
+                BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
+                String owner = logEntry.getTopics().size() > 1 ? decodeAddress(logEntry.getTopics().get(1)) : "";
+                int tickLower = logEntry.getTopics().size() > 2
+                        ? ((Int24) FunctionReturnDecoder.decodeIndexedValue(logEntry.getTopics().get(2), TypeReference.create(Int24.class, true))).getValue().intValue()
+                        : 0;
+                int tickUpper = logEntry.getTopics().size() > 3
+                        ? ((Int24) FunctionReturnDecoder.decodeIndexedValue(logEntry.getTopics().get(3), TypeReference.create(Int24.class, true))).getValue().intValue()
+                        : 0;
+                log.info("POOL_REMOVED_V3 pool={} owner={} token0={} token1={} tickLower={} tickUpper={} burnedLiquidity={} amount0={} amount1={} time={}",
+                        pairAddress, owner, token0, token1, tickLower, tickUpper, burnedLiquidity, normalized0, normalized1, Instant.now());
+                if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
+                    transferMonitorService.removeLiquidityPair(pairAddress);
+                }
             }
         } catch (Exception ex) {
             log.error("Failed to handle burn log", ex);

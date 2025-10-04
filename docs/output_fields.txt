@@ -15,7 +15,8 @@
 ## 流动性事件日志
 - `PAIR_CREATED`：在 PancakeSwap/Uniswap V2 工厂创建的新池子，包含 `pair`（池子地址）、`token0`、`token1`、`liquidity`（初始流动性）和 `time`。
 - `POOL_CREATED`：在 V3/V4 工厂创建的新池子，包含 `pool`（池子地址）、`token0`、`token1`、`fee`、`tickSpacing` 和 `time`。
-- `POOL_REMOVED`：检测到池子的 Burn 事件，包含 `pair`（池子地址）、`amount0`、`amount1`（经换算后的代币数量）和 `time`。当池子储备为 0 时，会自动从转账监控中移除该池子。
+- `POOL_REMOVED`：检测到 V2 池子的 Burn 事件，包含 `pair`（池子地址）、`sender`、`to`、`token0`、`token1`、`amount0`、`amount1`（经换算后的代币数量）和 `time`。当池子储备为 0 时，会自动从转账监控中移除该池子。
+- `POOL_REMOVED_V3`：检测到 V3 池子的 Burn 事件，包含 `pool`（池子地址）、`owner`、`token0`、`token1`、`tickLower`、`tickUpper`、`burnedLiquidity`、`amount0`、`amount1`（经换算后的代币数量）和 `time`。当池子储备为 0 时，会自动从转账监控中移除该池子。
 
 ## 其他说明
 - 所有金额单位默认为代币原始单位或美元，日志中的格式可以直接用于进一步分析或导入 BI 工具。
