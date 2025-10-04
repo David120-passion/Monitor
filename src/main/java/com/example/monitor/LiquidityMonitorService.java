@@ -20,7 +20,9 @@ import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.crypto.Hash;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.DefaultBlockParameterNumber;
 import org.web3j.protocol.core.methods.request.EthFilter;
+import org.web3j.protocol.core.methods.response.EthLog;
 import org.web3j.protocol.core.methods.response.Log;
 
 import java.math.BigDecimal;
@@ -33,6 +35,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * 流动性池监控服务
@@ -58,6 +61,9 @@ public class LiquidityMonitorService {
     private final ConcurrentHashMap<String, V4PoolMetadata> v4Pools = new ConcurrentHashMap<>();
     /** 已订阅 V4 ModifyLiquidity 事件的池子集合 */
     private final Set<String> v4SubscribedPools = ConcurrentHashMap.newKeySet();
+
+    /** 批量回溯日志时每个区块段的大小 */
+    private static final BigInteger LOG_BATCH_SIZE = BigInteger.valueOf(5_000L);
 
     /** V2 PairCreated 事件 */
     private static final Event PAIR_CREATED_EVENT = new Event("PairCreated",
@@ -201,7 +207,18 @@ public class LiquidityMonitorService {
     }
 
     private void subscribeV4Factory(String factoryAddress) {
-        EthFilter initFilter = new EthFilter(DefaultBlockParameterName.EARLIEST, DefaultBlockParameterName.LATEST, factoryAddress);
+        if (factoryAddress == null) {
+            return;
+        }
+        BigInteger latestBlock = fetchLatestBlockNumber();
+        backfillLogs(factoryAddress,
+                EventEncoder.encode(INITIALIZE_EVENT_V4),
+                null,
+                BigInteger.ZERO,
+                latestBlock,
+                logEntry -> handleV4InitializeLog(factoryAddress, logEntry));
+
+        EthFilter initFilter = new EthFilter(new DefaultBlockParameterNumber(latestBlock.max(BigInteger.ZERO)), DefaultBlockParameterName.LATEST, factoryAddress);
         initFilter.addSingleTopic(EventEncoder.encode(INITIALIZE_EVENT_V4));
         web3j.ethLogFlowable(initFilter).subscribe(logEntry -> handleV4InitializeLog(factoryAddress, logEntry), throwable ->
                 log.error("Error processing V4 initialize event", throwable));
@@ -332,13 +349,14 @@ public class LiquidityMonitorService {
                         hooks,
                         Instant.now());
             }
-            subscribeV4ModifyLiquidity(factoryAddress, poolIdTopic);
+            BigInteger startBlock = Optional.ofNullable(logEntry.getBlockNumber()).orElse(BigInteger.ZERO);
+            subscribeV4ModifyLiquidity(factoryAddress, poolIdTopic, startBlock);
         } catch (Exception ex) {
             log.error("Failed to handle V4 initialize log", ex);
         }
     }
 
-    private void subscribeV4ModifyLiquidity(String factoryAddress, String poolIdTopic) {
+    private void subscribeV4ModifyLiquidity(String factoryAddress, String poolIdTopic, BigInteger startBlock) {
         if (factoryAddress == null || poolIdTopic == null) {
             return;
         }
@@ -347,10 +365,19 @@ public class LiquidityMonitorService {
         if (!v4SubscribedPools.add(normalizedKey)) {
             return;
         }
-        EthFilter modifyFilter = new EthFilter(DefaultBlockParameterName.EARLIEST, DefaultBlockParameterName.LATEST, factoryAddress);
+        BigInteger fromBlock = Optional.ofNullable(startBlock).orElse(BigInteger.ZERO);
+        BigInteger latestBlock = fetchLatestBlockNumber();
+        backfillLogs(factoryAddress,
+                EventEncoder.encode(MODIFY_LIQUIDITY_EVENT_V4),
+                normalizedPoolId,
+                fromBlock,
+                latestBlock,
+                this::handleV4ModifyLiquidityLog);
+
+        EthFilter modifyFilter = new EthFilter(new DefaultBlockParameterNumber(latestBlock.max(BigInteger.ZERO)), DefaultBlockParameterName.LATEST, factoryAddress);
         modifyFilter.addSingleTopic(EventEncoder.encode(MODIFY_LIQUIDITY_EVENT_V4));
         modifyFilter.addOptionalTopics(normalizedPoolId);
-        web3j.ethLogFlowable(modifyFilter).subscribe(logEntry -> handleV4ModifyLiquidityLog(logEntry), throwable ->
+        web3j.ethLogFlowable(modifyFilter).subscribe(this::handleV4ModifyLiquidityLog, throwable ->
                 log.error("Error processing V4 modify liquidity event", throwable));
     }
 
@@ -399,6 +426,59 @@ public class LiquidityMonitorService {
                     Instant.now());
         } catch (Exception ex) {
             log.error("Failed to handle V4 modify liquidity log", ex);
+        }
+    }
+
+    private void backfillLogs(String contractAddress,
+                              String topic0,
+                              String topic1,
+                              BigInteger fromBlock,
+                              BigInteger toBlock,
+                              Consumer<Log> logHandler) {
+        if (contractAddress == null || topic0 == null || logHandler == null) {
+            return;
+        }
+        BigInteger start = Optional.ofNullable(fromBlock).orElse(BigInteger.ZERO);
+        BigInteger endBoundary = Optional.ofNullable(toBlock).orElse(fetchLatestBlockNumber());
+        if (start.compareTo(endBoundary) > 0) {
+            return;
+        }
+        while (start.compareTo(endBoundary) <= 0) {
+            BigInteger segmentEnd = start.add(LOG_BATCH_SIZE);
+            if (segmentEnd.compareTo(endBoundary) > 0) {
+                segmentEnd = endBoundary;
+            }
+            EthFilter filter = new EthFilter(new DefaultBlockParameterNumber(start), new DefaultBlockParameterNumber(segmentEnd), contractAddress);
+            filter.addSingleTopic(topic0);
+            if (topic1 != null) {
+                filter.addOptionalTopics(topic1);
+            }
+            try {
+                EthLog response = web3j.ethGetLogs(filter).send();
+                if (response.hasError()) {
+                    log.warn("Failed to backfill logs contract={} fromBlock={} toBlock={} error={}",
+                            contractAddress,
+                            start,
+                            segmentEnd,
+                            response.getError().getMessage());
+                } else {
+                    response.getLogs().stream()
+                            .map(logResult -> (Log) logResult.get())
+                            .forEach(logHandler);
+                }
+            } catch (Exception ex) {
+                log.error("Failed to backfill logs contract={} fromBlock={} toBlock={}", contractAddress, start, segmentEnd, ex);
+            }
+            start = segmentEnd.add(BigInteger.ONE);
+        }
+    }
+
+    private BigInteger fetchLatestBlockNumber() {
+        try {
+            return web3j.ethBlockNumber().send().getBlockNumber();
+        } catch (Exception ex) {
+            log.error("Failed to fetch latest block number", ex);
+            return BigInteger.ZERO;
         }
     }
 
