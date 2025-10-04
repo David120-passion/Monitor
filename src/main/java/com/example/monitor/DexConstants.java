@@ -13,15 +13,15 @@ public class DexConstants {
     public static final String PANCAKE_V2_FACTORY = "0xcA143Ce32Fe78f1f7019d7d551a6402fC5350c73";
     /** PancakeSwap V3 工厂地址 */
     public static final String PANCAKE_V3_FACTORY = "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865";
-    /** PancakeSwap V4 工厂地址（占位，若上线可替换真实地址） */
-    public static final String PANCAKE_V4_FACTORY = "0x0000000000000000000000000000000000000000";
+    /** PancakeSwap V4 PoolManager 地址（需根据正式部署更新） */
+    public static final String PANCAKE_V4_POOL_MANAGER = "0x0000000000000000000000000000000000000000";
 
     /** Uniswap V2 工厂地址（BSC 部署） */
     public static final String UNISWAP_V2_FACTORY = "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6";
     /** Uniswap V3 工厂地址（BSC 部署占位） */
     public static final String UNISWAP_V3_FACTORY = "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7";
-    /** Uniswap V4 工厂地址占位 */
-    public static final String UNISWAP_V4_FACTORY = "0x0000000000000000000000000000000000000000";
+    /** Uniswap V4 PoolManager 地址（需根据正式部署更新） */
+    public static final String UNISWAP_V4_POOL_MANAGER = "0x0000000000000000000000000000000000000000";
     //正式
     /** WBNB 代币地址 */
     public static final String WBNB_ADDRESS = "0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
@@ -48,10 +48,10 @@ public class DexConstants {
             BigInteger.valueOf(10000)     // 1%
     ));
 
-    /** PancakeSwap V4 工厂列表 */
-    public static final List<String> V4_FACTORIES = Collections.unmodifiableList(Arrays.asList(
-            PANCAKE_V4_FACTORY,
-            UNISWAP_V4_FACTORY
+    /** V4 PoolManager 列表 */
+    public static final List<String> V4_POOL_MANAGERS = Collections.unmodifiableList(Arrays.asList(
+            PANCAKE_V4_POOL_MANAGER,
+            UNISWAP_V4_POOL_MANAGER
     ));
 
     private DexConstants() {

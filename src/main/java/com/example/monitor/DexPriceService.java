@@ -321,7 +321,7 @@ public class DexPriceService {
     }
 
     public Optional<PriceRange> calculateTargetPriceRange(PairMetadata metadata, int tickLower, int tickUpper) {
-        if (metadata == null || metadata.poolType != PoolType.V3) {
+        if (metadata == null || (metadata.poolType != PoolType.V3 && metadata.poolType != PoolType.V4)) {
             return Optional.empty();
         }
         BigDecimal lowerRatio = priceFromTick(tickLower, metadata);
@@ -391,6 +391,7 @@ public class DexPriceService {
      */
     public List<PairMetadata> findOrCreateV3Pools(String tokenA, String tokenB) {
         List<PairMetadata> pools = new ArrayList<>();
+        List<String> concentratedFactories = new ArrayList<>(DexConstants.V3_FACTORIES);
         for (BigInteger fee : DexConstants.V3_FEE_TIERS) {
             String key = buildV3PoolKey(tokenA, tokenB, fee);
             PairMetadata cached = v3PoolCache.get(key);
@@ -398,7 +399,10 @@ public class DexPriceService {
                 pools.add(cached);
                 continue;
             }
-            for (String factory : DexConstants.V3_FACTORIES) {
+            for (String factory : concentratedFactories) {
+                if (factory == null || isZeroAddress(factory)) {
+                    continue;
+                }
                 Optional<PairMetadata> metadata = queryV3Pool(factory, tokenA, tokenB, fee);
                 if (metadata.isPresent()) {
                     PairMetadata pairMetadata = metadata.get();
@@ -750,7 +754,8 @@ public class DexPriceService {
      */
     public enum PoolType {
         V2,
-        V3
+        V3,
+        V4
     }
 
     /**
@@ -803,5 +808,38 @@ public class DexPriceService {
             String symbol1 = token1Symbol != null ? token1Symbol : token1;
             return symbol0.toLowerCase(java.util.Locale.ROOT) + "-" + symbol1.toLowerCase(java.util.Locale.ROOT);
         }
+    }
+
+    /**
+     * 基于 V4 PoolManager 事件直接构建并缓存池子元数据
+     *
+     * @param poolId  池子 ID（PoolId）
+     * @param token0  token0 地址
+     * @param token1  token1 地址
+     * @param fee     费率
+     * @return 元数据
+     */
+    public PairMetadata createOrUpdateV4PoolMetadata(String poolId, String token0, String token1, BigInteger fee) {
+        if (poolId == null || token0 == null || token1 == null) {
+            return null;
+        }
+        String normalizedPoolId = poolId.toLowerCase(Locale.ROOT);
+        PairMetadata existing = pairCacheByAddress.get(normalizedPoolId);
+        if (existing != null) {
+            PairMetadata updated = existing.withPoolType(PoolType.V4);
+            if (fee != null) {
+                updated = updated.withFee(fee);
+            }
+            cachePairMetadata(updated, false);
+            return updated;
+        }
+        BigInteger token0Decimals = fetchDecimals(token0);
+        BigInteger token1Decimals = fetchDecimals(token1);
+        String token0Symbol = fetchSymbol(token0);
+        String token1Symbol = fetchSymbol(token1);
+        PairMetadata metadata = new PairMetadata(poolId, token0, token1, token0Decimals, token1Decimals,
+                token0Symbol, token1Symbol, PoolType.V4, fee);
+        cachePairMetadata(metadata, false);
+        return metadata;
     }
 }

@@ -8,7 +8,9 @@ import org.web3j.abi.TypeReference;
 import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Event;
 import org.web3j.abi.datatypes.Type;
+import org.web3j.abi.datatypes.generated.Bytes32;
 import org.web3j.abi.datatypes.generated.Int24;
+import org.web3j.abi.datatypes.generated.Int256;
 import org.web3j.abi.datatypes.generated.Uint128;
 import org.web3j.abi.datatypes.generated.Uint24;
 import org.web3j.abi.datatypes.generated.Uint256;
@@ -16,6 +18,7 @@ import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.Log;
+import org.web3j.utils.Numeric;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -24,6 +27,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,6 +52,8 @@ public class LiquidityMonitorService {
     private final Set<String> burnSubscribedPools = ConcurrentHashMap.newKeySet();
     /** 已订阅 Mint 事件的池子集合 */
     private final Set<String> mintSubscribedPools = ConcurrentHashMap.newKeySet();
+    /** V4 池子详情缓存 */
+    private final Map<String, V4PoolDetails> v4PoolDetails = new ConcurrentHashMap<>();
 
     /** V2 PairCreated 事件 */
     private static final Event PAIR_CREATED_EVENT = new Event("PairCreated",
@@ -60,6 +66,16 @@ public class LiquidityMonitorService {
     /** V3 PoolCreated 事件 */
     private static final Event POOL_CREATED_EVENT = new Event("PoolCreated",
             Arrays.asList(
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Uint24.class),
+                    TypeReference.create(Int24.class),
+                    TypeReference.create(Address.class)
+            ));
+    /** V4 PoolCreated 事件 */
+    private static final Event POOL_CREATED_EVENT_V4 = new Event("PoolCreated",
+            Arrays.asList(
+                    TypeReference.create(Bytes32.class, true),
                     TypeReference.create(Address.class, true),
                     TypeReference.create(Address.class, true),
                     TypeReference.create(Uint24.class),
@@ -102,6 +118,18 @@ public class LiquidityMonitorService {
                     TypeReference.create(Uint256.class),
                     TypeReference.create(Uint256.class)
             ));
+    /** V4 ModifyLiquidity 事件 */
+    private static final Event MODIFY_LIQUIDITY_EVENT_V4 = new Event("ModifyLiquidity",
+            Arrays.asList(
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Bytes32.class, true),
+                    TypeReference.create(Int24.class),
+                    TypeReference.create(Int24.class),
+                    TypeReference.create(Int256.class),
+                    TypeReference.create(Int256.class),
+                    TypeReference.create(Int256.class),
+                    TypeReference.create(Bytes32.class)
+            ));
 
     /**
      * 构造函数
@@ -118,8 +146,26 @@ public class LiquidityMonitorService {
      * 启动监听
      */
     public void start() {
-        DexConstants.V2_FACTORIES.forEach(factory -> subscribeFactory(factory, PAIR_CREATED_EVENT));
-        DexConstants.V3_FACTORIES.forEach(factory -> subscribeFactory(factory, POOL_CREATED_EVENT));
+        DexConstants.V2_FACTORIES.stream()
+                .filter(this::isNonZeroAddress)
+                .forEach(factory -> subscribeFactory(factory, PAIR_CREATED_EVENT));
+        DexConstants.V3_FACTORIES.stream()
+                .filter(this::isNonZeroAddress)
+                .forEach(factory -> subscribeFactory(factory, POOL_CREATED_EVENT));
+        DexConstants.V4_POOL_MANAGERS.stream()
+                .filter(this::isNonZeroAddress)
+                .forEach(manager -> {
+                    subscribeFactory(manager, POOL_CREATED_EVENT_V4);
+                    subscribeFactory(manager, MODIFY_LIQUIDITY_EVENT_V4);
+                });
+    }
+
+    private boolean isNonZeroAddress(String address) {
+        if (address == null) {
+            return false;
+        }
+        String normalized = address.trim();
+        return !normalized.isEmpty() && !"0x0000000000000000000000000000000000000000".equalsIgnoreCase(normalized);
     }
 
     /**
@@ -238,9 +284,134 @@ public class LiquidityMonitorService {
                                 poolAddress, token0, token1, fee, tickSpacing, Instant.now());
                     }
                 }
+            } else if (event.equals(POOL_CREATED_EVENT_V4)) {
+                handleV4PoolCreated(logEntry);
+            } else if (event.equals(MODIFY_LIQUIDITY_EVENT_V4)) {
+                handleV4ModifyLiquidityLog(logEntry);
             }
         } catch (Exception ex) {
             log.error("Failed to handle factory log", ex);
+        }
+    }
+
+    private void handleV4PoolCreated(Log logEntry) {
+        List<String> topics = logEntry.getTopics();
+        if (topics.size() < 4) {
+            return;
+        }
+        String poolId = normalizePoolId(topics.get(1));
+        String token0 = decodeAddress(topics.get(2));
+        String token1 = decodeAddress(topics.get(3));
+        List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), POOL_CREATED_EVENT_V4.getNonIndexedParameters());
+        if (data.size() < 3) {
+            return;
+        }
+        BigInteger fee = ((Uint24) data.get(0)).getValue();
+        int tickSpacing = ((Int24) data.get(1)).getValue().intValue();
+        String hooks = ((Address) data.get(2)).getValue();
+        DexPriceService.PairMetadata metadata = priceService.createOrUpdateV4PoolMetadata(poolId, token0, token1, fee);
+        if (metadata == null) {
+            return;
+        }
+        registerPool(metadata);
+        String normalizedId = poolId.toLowerCase(Locale.ROOT);
+        v4PoolDetails.put(normalizedId, new V4PoolDetails(poolId, metadata, fee, tickSpacing, hooks));
+        log.info("POOL_CREATED_V4 poolId={} name={} token0={} token1={} fee={} tickSpacing={} hooks={} time={}",
+                poolId,
+                metadata.getDisplayName(),
+                token0,
+                token1,
+                formatFee(metadata.fee != null ? metadata.fee : fee),
+                tickSpacing,
+                hooks,
+                Instant.now());
+    }
+
+    private void handleV4ModifyLiquidityLog(Log logEntry) {
+        List<String> topics = logEntry.getTopics();
+        if (topics.size() < 3) {
+            return;
+        }
+        String sender = decodeAddress(topics.get(1));
+        String poolId = normalizePoolId(topics.get(2));
+        String normalizedId = poolId.toLowerCase(Locale.ROOT);
+        V4PoolDetails details = v4PoolDetails.get(normalizedId);
+        Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(poolId,
+                false,
+                DexPriceService.PoolType.V4,
+                details != null ? details.fee : null);
+        if (!metadataOpt.isPresent() && details != null && details.metadata != null) {
+            metadataOpt = Optional.of(details.metadata);
+        }
+        if (!metadataOpt.isPresent()) {
+            return;
+        }
+        List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), MODIFY_LIQUIDITY_EVENT_V4.getNonIndexedParameters());
+        if (data.size() < 6) {
+            return;
+        }
+        int tickLower = ((Int24) data.get(0)).getValue().intValue();
+        int tickUpper = ((Int24) data.get(1)).getValue().intValue();
+        BigInteger liquidityDelta = ((Int256) data.get(2)).getValue();
+        BigInteger amount0Raw = ((Int256) data.get(3)).getValue();
+        BigInteger amount1Raw = ((Int256) data.get(4)).getValue();
+        BigInteger amount0 = amount0Raw.abs();
+        BigInteger amount1 = amount1Raw.abs();
+        BigDecimal normalized0 = normalizeAmount(amount0, metadataOpt, true);
+        BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
+        Optional<DexPriceService.PriceRange> priceRangeOpt = metadataOpt.flatMap(meta ->
+                priceService.calculateTargetPriceRange(meta, tickLower, tickUpper));
+        String priceRange = formatPriceRange(priceRangeOpt);
+        DexPriceService.PairMetadata metadata = metadataOpt.get();
+        if (details == null || details.metadata != metadata) {
+            v4PoolDetails.put(normalizedId, new V4PoolDetails(poolId,
+                    metadata,
+                    metadata.fee != null ? metadata.fee : (details != null ? details.fee : null),
+                    details != null ? details.tickSpacing : 0,
+                    details != null ? details.hooks : ""));
+            details = v4PoolDetails.get(normalizedId);
+        }
+        String token0 = metadata.token0;
+        String token1 = metadata.token1;
+        String pairName = metadata.getDisplayName();
+        String feeText = formatFee(metadata.fee);
+        BigInteger liquidityAbs = liquidityDelta.abs();
+        String hooks = details != null ? details.hooks : "";
+        Instant now = Instant.now();
+        if (liquidityDelta.signum() >= 0) {
+            log.info("POOL_ADDED_V4 poolId={} name={} sender={} fee={} hooks={} token0={} token1={} tickLower={} tickUpper={} " +
+                            "liquidityDelta={} amount0={} amount1={} priceRange={} time={}",
+                    poolId,
+                    pairName,
+                    sender,
+                    feeText,
+                    hooks,
+                    token0,
+                    token1,
+                    tickLower,
+                    tickUpper,
+                    liquidityAbs,
+                    normalized0,
+                    normalized1,
+                    priceRange,
+                    now);
+        } else {
+            log.info("POOL_REMOVED_V4 poolId={} name={} sender={} fee={} hooks={} token0={} token1={} tickLower={} tickUpper=" +
+                            "{} liquidityDelta={} amount0={} amount1={} priceRange={} time={}",
+                    poolId,
+                    pairName,
+                    sender,
+                    feeText,
+                    hooks,
+                    token0,
+                    token1,
+                    tickLower,
+                    tickUpper,
+                    liquidityAbs,
+                    normalized0,
+                    normalized1,
+                    priceRange,
+                    now);
         }
     }
 
@@ -448,9 +619,16 @@ public class LiquidityMonitorService {
                 metadata.fee);
         String normalized = metadata.pairAddress.toLowerCase();
         if (registeredPools.add(normalized)) {
-            transferMonitorService.addLiquidityPair(metadata.pairAddress);
+            if (metadata.poolType != DexPriceService.PoolType.V4) {
+                transferMonitorService.addLiquidityPair(metadata.pairAddress);
+            }
             if (metadata.poolType == DexPriceService.PoolType.V3) {
                 log.info("POOL_REGISTERED pair={} name={} fee={}",
+                        metadata.pairAddress,
+                        metadata.getDisplayName(),
+                        formatFee(metadata.fee));
+            } else if (metadata.poolType == DexPriceService.PoolType.V4) {
+                log.info("POOL_REGISTERED_V4 poolId={} name={} fee={}",
                         metadata.pairAddress,
                         metadata.getDisplayName(),
                         formatFee(metadata.fee));
@@ -471,6 +649,17 @@ public class LiquidityMonitorService {
             clean = String.format("%40s", clean).replace(' ', '0');
         }
         return "0x" + clean.substring(clean.length() - 40);
+    }
+
+    private String normalizePoolId(String topic) {
+        if (topic == null) {
+            return "";
+        }
+        String clean = Numeric.cleanHexPrefix(topic).toLowerCase(Locale.ROOT);
+        if (clean.length() < 64) {
+            clean = String.format("%64s", clean).replace(' ', '0');
+        }
+        return "0x" + clean;
     }
 
     private String formatPairName(Optional<DexPriceService.PairMetadata> metadataOpt, String token0, String token1) {
@@ -517,5 +706,25 @@ public class LiquidityMonitorService {
                             .divide(BigDecimal.TEN.pow(decimals.intValue()), 8, RoundingMode.HALF_UP);
                 })
                 .orElseGet(() -> new BigDecimal(rawAmount));
+    }
+
+    private static class V4PoolDetails {
+        private final String poolId;
+        private final DexPriceService.PairMetadata metadata;
+        private final BigInteger fee;
+        private final int tickSpacing;
+        private final String hooks;
+
+        private V4PoolDetails(String poolId,
+                              DexPriceService.PairMetadata metadata,
+                              BigInteger fee,
+                              int tickSpacing,
+                              String hooks) {
+            this.poolId = poolId;
+            this.metadata = metadata;
+            this.fee = fee;
+            this.tickSpacing = tickSpacing;
+            this.hooks = hooks;
+        }
     }
 }
