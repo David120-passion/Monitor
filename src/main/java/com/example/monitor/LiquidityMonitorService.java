@@ -9,6 +9,7 @@ import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Event;
 import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Int24;
+import org.web3j.abi.datatypes.generated.Uint128;
 import org.web3j.abi.datatypes.generated.Uint24;
 import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.protocol.Web3j;
@@ -40,8 +41,12 @@ public class LiquidityMonitorService {
     private final DexPriceService priceService;
     /** 转账监控服务 */
     private final TransferMonitorService transferMonitorService;
-    /** 已监听的池子集合 */
-    private final Set<String> watchedPools = ConcurrentHashMap.newKeySet();
+    /** 已注册的池子集合 */
+    private final Set<String> registeredPools = ConcurrentHashMap.newKeySet();
+    /** 已订阅 Burn 事件的池子集合 */
+    private final Set<String> burnSubscribedPools = ConcurrentHashMap.newKeySet();
+    /** 已订阅 Mint 事件的池子集合 */
+    private final Set<String> mintSubscribedPools = ConcurrentHashMap.newKeySet();
 
     /** V2 PairCreated 事件 */
     private static final Event PAIR_CREATED_EVENT = new Event("PairCreated",
@@ -68,6 +73,24 @@ public class LiquidityMonitorService {
                     TypeReference.create(Uint256.class),
                     TypeReference.create(Address.class, true)
             ));
+    /** V2 Mint 事件 */
+    private static final Event MINT_EVENT_V2 = new Event("Mint",
+            Arrays.asList(
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Uint256.class),
+                    TypeReference.create(Uint256.class)
+            ));
+    /** V3 Mint 事件 */
+    private static final Event MINT_EVENT_V3 = new Event("Mint",
+            Arrays.asList(
+                    TypeReference.create(Address.class),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Int24.class, true),
+                    TypeReference.create(Int24.class, true),
+                    TypeReference.create(Uint128.class),
+                    TypeReference.create(Uint256.class),
+                    TypeReference.create(Uint256.class)
+            ));
 
     /**
      * 构造函数
@@ -93,9 +116,17 @@ public class LiquidityMonitorService {
      */
     public void registerInitialPairs() {
         priceService.findOrCreatePair(tokenAddress, DexConstants.BUSD_ADDRESS)
-                .ifPresent(pair -> registerPool(pair.pairAddress, pair.token0, pair.token1));
+                .ifPresent(pair -> {
+                    registerPool(pair.pairAddress, pair.token0, pair.token1);
+                    subscribeMint(pair.pairAddress, pair.token0, pair.token1, MINT_EVENT_V2);
+                    subscribeBurn(pair.pairAddress, pair.token0, pair.token1);
+                });
         priceService.findOrCreatePair(tokenAddress, DexConstants.WBNB_ADDRESS)
-                .ifPresent(pair -> registerPool(pair.pairAddress, pair.token0, pair.token1));
+                .ifPresent(pair -> {
+                    registerPool(pair.pairAddress, pair.token0, pair.token1);
+                    subscribeMint(pair.pairAddress, pair.token0, pair.token1, MINT_EVENT_V2);
+                    subscribeBurn(pair.pairAddress, pair.token0, pair.token1);
+                });
     }
 
     /**
@@ -136,6 +167,7 @@ public class LiquidityMonitorService {
                     registerPool(pairAddress, token0, token1);
                     log.info("PAIR_CREATED pair={} token0={} token1={} liquidity={} time={}", pairAddress, token0, token1, liquidity,
                             Instant.now());
+                    subscribeMint(pairAddress, token0, token1, MINT_EVENT_V2);
                     subscribeBurn(pairAddress, token0, token1);
                 }
             } else if (event.equals(POOL_CREATED_EVENT)) {
@@ -155,6 +187,7 @@ public class LiquidityMonitorService {
                     registerPool(poolAddress, token0, token1);
                     log.info("POOL_CREATED pool={} token0={} token1={} fee={} tickSpacing={} time={}",
                             poolAddress, token0, token1, fee, tickSpacing, Instant.now());
+                    subscribeMint(poolAddress, token0, token1, MINT_EVENT_V3);
                     subscribeBurn(poolAddress, token0, token1);
                 }
             }
@@ -171,15 +204,40 @@ public class LiquidityMonitorService {
      * @param token1      token1 地址
      */
     private void subscribeBurn(String pairAddress, String token0, String token1) {
-        if (pairAddress == null || watchedPools.contains(pairAddress.toLowerCase())) {
+        if (pairAddress == null) {
             return;
         }
-        watchedPools.add(pairAddress.toLowerCase());
-        transferMonitorService.addLiquidityPair(pairAddress);
+        String normalized = pairAddress.toLowerCase();
+        if (!burnSubscribedPools.add(normalized)) {
+            return;
+        }
         EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, pairAddress);
         filter.addSingleTopic(EventEncoder.encode(BURN_EVENT));
         web3j.ethLogFlowable(filter).subscribe(logEntry -> handleBurnLog(pairAddress, token0, token1, logEntry), throwable ->
                 log.error("Error processing burn event", throwable));
+    }
+
+    /**
+     * 订阅 Mint 事件以检测加池
+     *
+     * @param pairAddress 池子地址
+     * @param token0      token0 地址
+     * @param token1      token1 地址
+     * @param event       事件定义
+     */
+    private void subscribeMint(String pairAddress, String token0, String token1, Event event) {
+        if (pairAddress == null || event == null) {
+            return;
+        }
+        String eventTopic = EventEncoder.encode(event);
+        String normalized = pairAddress.toLowerCase() + ":" + eventTopic;
+        if (!mintSubscribedPools.add(normalized)) {
+            return;
+        }
+        EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, pairAddress);
+        filter.addSingleTopic(eventTopic);
+        web3j.ethLogFlowable(filter).subscribe(logEntry -> handleMintLog(pairAddress, token0, token1, event, logEntry), throwable ->
+                log.error("Error processing mint event", throwable));
     }
 
     /**
@@ -199,20 +257,65 @@ public class LiquidityMonitorService {
             BigInteger amount0 = (BigInteger) data.get(0).getValue();
             BigInteger amount1 = (BigInteger) data.get(1).getValue();
             Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress);
-            BigDecimal normalized0 = metadataOpt
-                    .map(meta -> new BigDecimal(amount0)
-                            .divide(BigDecimal.TEN.pow(meta.token0Decimals.intValue()), 8, RoundingMode.HALF_UP))
-                    .orElseGet(() -> new BigDecimal(amount0));
-            BigDecimal normalized1 = metadataOpt
-                    .map(meta -> new BigDecimal(amount1)
-                            .divide(BigDecimal.TEN.pow(meta.token1Decimals.intValue()), 8, RoundingMode.HALF_UP))
-                    .orElseGet(() -> new BigDecimal(amount1));
+            BigDecimal normalized0 = normalizeAmount(amount0, metadataOpt, true);
+            BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
             log.info("POOL_REMOVED pair={} amount0={} amount1={} time={}", pairAddress, normalized0, normalized1, Instant.now());
             if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
                 transferMonitorService.removeLiquidityPair(pairAddress);
             }
         } catch (Exception ex) {
             log.error("Failed to handle burn log", ex);
+        }
+    }
+
+    /**
+     * 处理 Mint 日志
+     *
+     * @param pairAddress 池子地址
+     * @param token0      token0 地址
+     * @param token1      token1 地址
+     * @param event       事件
+     * @param logEntry    日志
+     */
+    private void handleMintLog(String pairAddress, String token0, String token1, Event event, Log logEntry) {
+        try {
+            if (event.equals(MINT_EVENT_V2)) {
+                List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
+                if (data.size() < 2) {
+                    return;
+                }
+                BigInteger amount0 = (BigInteger) data.get(0).getValue();
+                BigInteger amount1 = (BigInteger) data.get(1).getValue();
+                Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress);
+                BigDecimal normalized0 = normalizeAmount(amount0, metadataOpt, true);
+                BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
+                String sender = logEntry.getTopics().size() > 1 ? decodeAddress(logEntry.getTopics().get(1)) : "";
+                log.info("POOL_ADDED pair={} sender={} token0={} token1={} amount0={} amount1={} time={}",
+                        pairAddress, sender, token0, token1, normalized0, normalized1, Instant.now());
+            } else if (event.equals(MINT_EVENT_V3)) {
+                List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
+                if (data.size() < 4) {
+                    return;
+                }
+                String sender = data.get(0).getValue().toString();
+                BigInteger liquidity = (BigInteger) data.get(1).getValue();
+                BigInteger amount0 = (BigInteger) data.get(2).getValue();
+                BigInteger amount1 = (BigInteger) data.get(3).getValue();
+                Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(pairAddress);
+                BigDecimal normalized0 = normalizeAmount(amount0, metadataOpt, true);
+                BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
+                String owner = logEntry.getTopics().size() > 1 ? decodeAddress(logEntry.getTopics().get(1)) : "";
+                int tickLower = logEntry.getTopics().size() > 2
+                        ? ((Int24) FunctionReturnDecoder.decodeIndexedValue(logEntry.getTopics().get(2), TypeReference.create(Int24.class, true))).getValue().intValue()
+                        : 0;
+                int tickUpper = logEntry.getTopics().size() > 3
+                        ? ((Int24) FunctionReturnDecoder.decodeIndexedValue(logEntry.getTopics().get(3), TypeReference.create(Int24.class, true))).getValue().intValue()
+                        : 0;
+                log.info("POOL_ADDED_V3 pool={} sender={} owner={} token0={} token1={} tickLower={} tickUpper={} liquidity={} amount0={} amount1={} time={}",
+                        pairAddress, sender, owner, token0, token1, tickLower, tickUpper, liquidity, normalized0, normalized1, Instant.now());
+            }
+        } catch (Exception ex) {
+            log.error("Failed to handle mint log", ex);
         }
     }
 
@@ -231,9 +334,15 @@ public class LiquidityMonitorService {
      * @param token1      token1 地址
      */
     private void registerPool(String pairAddress, String token0, String token1) {
-        transferMonitorService.addLiquidityPair(pairAddress);
+        if (pairAddress == null) {
+            return;
+        }
         priceService.loadPairMetadata(pairAddress);
-        log.info("POOL_REGISTERED pair={} token0={} token1={}", pairAddress, token0, token1);
+        String normalized = pairAddress.toLowerCase();
+        if (registeredPools.add(normalized)) {
+            transferMonitorService.addLiquidityPair(pairAddress);
+            log.info("POOL_REGISTERED pair={} token0={} token1={}", pairAddress, token0, token1);
+        }
     }
 
     /**
@@ -245,5 +354,21 @@ public class LiquidityMonitorService {
             clean = String.format("%40s", clean).replace(' ', '0');
         }
         return "0x" + clean.substring(clean.length() - 40);
+    }
+
+    /**
+     * 归一化金额
+     */
+    private BigDecimal normalizeAmount(BigInteger rawAmount, Optional<DexPriceService.PairMetadata> metadataOpt, boolean isToken0) {
+        return metadataOpt
+                .map(meta -> {
+                    BigInteger decimals = isToken0 ? meta.token0Decimals : meta.token1Decimals;
+                    if (decimals == null) {
+                        return new BigDecimal(rawAmount);
+                    }
+                    return new BigDecimal(rawAmount)
+                            .divide(BigDecimal.TEN.pow(decimals.intValue()), 8, RoundingMode.HALF_UP);
+                })
+                .orElseGet(() -> new BigDecimal(rawAmount));
     }
 }
