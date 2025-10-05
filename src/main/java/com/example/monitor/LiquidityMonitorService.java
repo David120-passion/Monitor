@@ -366,9 +366,7 @@ public class LiquidityMonitorService {
             String currency1 = normalizeAddress(decodeAddress(topics.get(3)));
             String hooks = normalizeAddress(((Address) data.get(0)).getValue().toString());
             BigInteger fee = ((Uint24) data.get(1)).getValue();
-            byte[] parameters = ((Bytes32) data.get(2)).getValue();
             BigInteger sqrtPriceX96 = ((Uint160) data.get(3)).getValue();
-            int tick = ((Int24) data.get(4)).getValue().intValue();
             if (!matchesTarget(currency0, currency1)) {
                 return;
             }
@@ -502,21 +500,17 @@ public class LiquidityMonitorService {
             String amount1Remaining = formatAmount(state != null ? state.getAmount1() : null);
             String tvlRemaining = formatTvl(calculateV4Tvl(metadata, state));
             String timestampText = formatTimestamp(timestamp);
-            log.info("{} name={} sender={} fee={} tickLower={} tickUpper={} amount0Delta={} amount1Delta={} priceRange={} avgPrice={} amount0Remaining={} amount1Remaining={} tvlRemaining={} salt={} time={}",
+            log.info("{} name={} sender={} fee={}  amount0Delta={} amount1Delta={} priceRange={}  amount0Remaining={} amount1Remaining={} tvlRemaining={}  time={}",
                     action,
                     metadata.getDisplayName(),
                     sender,
                     formatFee(metadata.fee),
-                    tickLower,
-                    tickUpper,
                     amount0Text,
                     amount1Text,
                     priceRangeText,
-                    averagePriceText,
                     amount0Remaining,
                     amount1Remaining,
                     tvlRemaining,
-                    salt,
                     timestampText);
         } catch (Exception ex) {
             log.error("Failed to handle V4 modify liquidity log", ex);
@@ -628,8 +622,8 @@ public class LiquidityMonitorService {
                 String priceRange = formatPriceRange(priceRangeOpt);
                 String pairName = formatPairName(metadataOpt, token0, token1);
                 String feeText = metadataOpt.map(meta -> formatFee(meta.fee)).orElse(formatFee(null));
-                log.info("POOL_REMOVED_V3 pool={} name={} owner={} fee={} priceRange={} token0={} token1={} tickLower={} tickUpper={} burnedLiquidity={} amount0={} amount1={} time={}",
-                        pairAddress, pairName, owner, feeText, priceRange, token0, token1, tickLower, tickUpper, burnedLiquidity, normalized0, normalized1,
+                log.info("POOL_REMOVED_V3 pool={} name={} owner={} fee={} priceRange={} token0={} token1={}  burnedLiquidity={} amount0={} amount1={} time={}",
+                        pairAddress, pairName, owner, feeText, priceRange, token0, token1,  burnedLiquidity, normalized0, normalized1,
                         formatTimestamp(resolveLogTimestamp(logEntry)));
                 if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
                     transferMonitorService.removeLiquidityPair(pairAddress);
@@ -695,8 +689,8 @@ public class LiquidityMonitorService {
                 String priceRange = formatPriceRange(priceRangeOpt);
                 String pairName = formatPairName(metadataOpt, token0, token1);
                 String feeText = metadataOpt.map(meta -> formatFee(meta.fee)).orElse(formatFee(null));
-                log.info("POOL_ADDED_V3 pool={} name={} sender={} owner={} fee={} priceRange={} token0={} token1={} tickLower={} tickUpper={} liquidity={} amount0={} amount1={} time={}",
-                        pairAddress, pairName, sender, owner, feeText, priceRange, token0, token1, tickLower, tickUpper, liquidity, normalized0, normalized1,
+                log.info("POOL_ADDED_V3 pool={} name={} sender={} owner={} fee={} priceRange={} token0={} token1={}  amount0={} amount1={} time={}",
+                        pairAddress, pairName, sender, owner, feeText, priceRange, token0, token1,  normalized0, normalized1,
                         formatTimestamp(resolveLogTimestamp(logEntry)));
             }
         } catch (Exception ex) {
@@ -748,7 +742,7 @@ public class LiquidityMonitorService {
                                 snapshot.currentTick + snapshot.tickSpacing))
                         .orElse(Optional.empty());
                 String priceRangeText = formatPriceRange(priceRangeOpt);
-                log.info("POOL_REGISTERED pair={} swap={} name={} fee={} amount0={} amount1={} price={} priceRange={} tick={} tickSpacing={} tvl={}",
+                log.info("POOL_REGISTERED pair={} swap={} name={} fee={} amount0={} amount1={} price={} priceRange={}  tvl={}",
                         metadata.pairAddress,
                         swapName,
                         metadata.getDisplayName(),
@@ -757,8 +751,6 @@ public class LiquidityMonitorService {
                         amount1Text,
                         priceText,
                         priceRangeText,
-                        snapshotOpt.map(snapshot -> snapshot.currentTick).map(String::valueOf).orElse("unknown"),
-                        snapshotOpt.map(snapshot -> snapshot.tickSpacing).map(String::valueOf).orElse("unknown"),
                         tvlText);
             } else {
                 log.info("POOL_REGISTERED pair={} swap={} name={} amount0={} amount1={} price={} tvl={}",
