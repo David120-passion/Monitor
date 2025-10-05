@@ -137,13 +137,13 @@ public class LiquidityMonitorService {
     private static final Event INITIALIZE_EVENT_V4_PANCAKE = new Event("Initialize",
             Arrays.asList(
                     TypeReference.create(Bytes32.class, true),
-                    TypeReference.create(Address.class),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Address.class, true),
                     TypeReference.create(Address.class),
                     TypeReference.create(Uint24.class),
-                    TypeReference.create(Int24.class),
+                    TypeReference.create(Bytes32.class),
                     TypeReference.create(Uint160.class),
-                    TypeReference.create(Uint24.class),
-                    TypeReference.create(Address.class)
+                    TypeReference.create(Int24.class)
             ));
     /** Uniswap V4 Initialize 事件 */
     private static final Event INITIALIZE_EVENT_V4_UNISWAP = new Event("Initialize",
@@ -399,14 +399,14 @@ public class LiquidityMonitorService {
                 sqrtPriceX96 = ((Uint160) data.get(3)).getValue();
                 hooks = normalizeAddress(((Address) data.get(2)).getValue());
             } else {
-                if (data.size() < 7) {
+                if (topics.size() < 4 || data.size() < 5) {
                     return;
                 }
-                currency0 = normalizeAddress(((Address) data.get(0)).getValue());
-                currency1 = normalizeAddress(((Address) data.get(1)).getValue());
-                fee = ((Uint24) data.get(2)).getValue();
-                sqrtPriceX96 = ((Uint160) data.get(4)).getValue();
-                hooks = normalizeAddress(((Address) data.get(6)).getValue());
+                currency0 = normalizeAddress(decodeAddress(topics.get(2)));
+                currency1 = normalizeAddress(decodeAddress(topics.get(3)));
+                hooks = normalizeAddress(((Address) data.get(0)).getValue());
+                fee = ((Uint24) data.get(1)).getValue();
+                sqrtPriceX96 = ((Uint160) data.get(3)).getValue();
             }
             if (!matchesTarget(currency0, currency1)) {
                 return;
