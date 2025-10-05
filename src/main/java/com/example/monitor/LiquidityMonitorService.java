@@ -21,6 +21,7 @@ import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.DefaultBlockParameterNumber;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.Log;
+import org.web3j.protocol.core.methods.response.EthBlock;
 import org.web3j.protocol.core.methods.response.EthLog;
 
 import java.io.IOException;
@@ -61,6 +62,8 @@ public class LiquidityMonitorService {
     private final ConcurrentHashMap<String, V4PoolMetadata> v4Pools = new ConcurrentHashMap<>();
     /** 已订阅 V4 ModifyLiquidity 事件的池子集合 */
     private final Set<String> v4SubscribedPools = ConcurrentHashMap.newKeySet();
+    /** 区块时间缓存 */
+    private final ConcurrentHashMap<BigInteger, Instant> blockTimestampCache = new ConcurrentHashMap<>();
     /** 代币创建区块 */
     private final BigInteger tokenCreationBlock;
     /** 日志查询单次最大区块跨度 */
@@ -194,9 +197,9 @@ public class LiquidityMonitorService {
     }
 
     /**
-     * 订阅工厂事件
+     * 订阅指定工厂事件
      *
-     * @param factoryAddress 工厂地址
+     * @param factoryAddress 工厂合约地址
      * @param event          事件
      */
     private void subscribeFactory(String factoryAddress, Event event) {
@@ -206,6 +209,11 @@ public class LiquidityMonitorService {
                 log.error("Error processing factory event", throwable));
     }
 
+    /**
+     * 订阅 V4 工厂 Initialize 事件
+     *
+     * @param factoryAddress 工厂合约地址
+     */
     private void subscribeV4Factory(String factoryAddress) {
         DefaultBlockParameter subscriptionStart = prepareHistoricalSubscription(
                 factoryAddress,
@@ -253,12 +261,12 @@ public class LiquidityMonitorService {
                                 token0,
                                 token1,
                                 liquidity,
-                                Instant.now());
+                                resolveLogTimestamp(logEntry));
                         subscribeMint(metadata, MINT_EVENT_V2);
                         subscribeBurn(metadata, BURN_EVENT_V2);
                     } else {
                         log.info("PAIR_CREATED pair={} token0={} token1={} liquidity={} time={}",
-                                pairAddress, token0, token1, liquidity, Instant.now());
+                                pairAddress, token0, token1, liquidity, resolveLogTimestamp(logEntry));
                     }
                 }
             } else if (event.equals(POOL_CREATED_EVENT)) {
@@ -285,12 +293,12 @@ public class LiquidityMonitorService {
                                 metadata.getDisplayName(),
                                 formatFee(metadata.fee != null ? metadata.fee : fee),
                                 tickSpacing,
-                                Instant.now());
+                                resolveLogTimestamp(logEntry));
                         subscribeMint(metadata, MINT_EVENT_V3);
                         subscribeBurn(metadata, BURN_EVENT_V3);
                     } else {
                         log.info("POOL_CREATED pool={} token0={} token1={} fee={} tickSpacing={} time={}",
-                                poolAddress, token0, token1, fee, tickSpacing, Instant.now());
+                                poolAddress, token0, token1, fee, tickSpacing, resolveLogTimestamp(logEntry));
                     }
                 }
             }
@@ -299,6 +307,12 @@ public class LiquidityMonitorService {
         }
     }
 
+    /**
+     * 处理 V4 Initialize 日志
+     *
+     * @param factoryAddress 工厂地址
+     * @param logEntry       日志
+     */
     private void handleV4InitializeLog(String factoryAddress, Log logEntry) {
         try {
             List<String> topics = logEntry.getTopics();
@@ -329,18 +343,21 @@ public class LiquidityMonitorService {
                     hooks);
             V4PoolMetadata previous = v4Pools.putIfAbsent(normalizedPoolId, metadata);
             if (previous == null) {
+                Instant timestamp = resolveLogTimestamp(logEntry);
+                String currency0Display = formatCurrencyDisplay(metadata.currency0Symbol, currency0);
+                String currency1Display = formatCurrencyDisplay(metadata.currency1Symbol, currency1);
                 log.info("POOL_INITIALIZED_V4 manager={} poolId={} name={} currency0={} currency1={} fee={} hooks={} parameters={} sqrtPriceX96={} tick={} time={}",
                         factoryAddress,
                         normalizedPoolId,
                         metadata.getDisplayName(),
-                        currency0,
-                        currency1,
+                        currency0Display,
+                        currency1Display,
                         formatFee(fee),
                         hooks,
                         org.web3j.utils.Numeric.toHexString(parameters),
                         sqrtPriceX96,
                         tick,
-                        Instant.now());
+                        timestamp);
             }
             subscribeV4ModifyLiquidity(factoryAddress, poolIdTopic);
         } catch (Exception ex) {
@@ -348,6 +365,12 @@ public class LiquidityMonitorService {
         }
     }
 
+    /**
+     * 订阅 V4 ModifyLiquidity 事件
+     *
+     * @param factoryAddress 工厂地址
+     * @param poolIdTopic    池子 ID 主题
+     */
     private void subscribeV4ModifyLiquidity(String factoryAddress, String poolIdTopic) {
         if (factoryAddress == null || poolIdTopic == null) {
             return;
@@ -371,6 +394,11 @@ public class LiquidityMonitorService {
                 log.error("Error processing V4 modify liquidity event", throwable));
     }
 
+    /**
+     * 处理 V4 ModifyLiquidity 日志
+     *
+     * @param logEntry 日志
+     */
     private void handleV4ModifyLiquidityLog(Log logEntry) {
         try {
             List<String> topics = logEntry.getTopics();
@@ -393,21 +421,24 @@ public class LiquidityMonitorService {
             String salt = org.web3j.utils.Numeric.toHexString(((Bytes32) data.get(3)).getValue());
             int sign = liquidityDelta.signum();
             String action = sign > 0 ? "POOL_ADDED_V4" : (sign < 0 ? "POOL_REMOVED_V4" : "POOL_UPDATED_V4");
+            Instant timestamp = resolveLogTimestamp(logEntry);
+            String currency0Display = formatCurrencyDisplay(metadata.currency0Symbol, metadata.currency0);
+            String currency1Display = formatCurrencyDisplay(metadata.currency1Symbol, metadata.currency1);
             log.info("{} manager={} poolId={} name={} sender={} currency0={} currency1={} fee={} hooks={} tickLower={} tickUpper={} liquidityDelta={} salt={} time={}",
                     action,
                     metadata.manager,
                     metadata.poolId,
                     metadata.getDisplayName(),
                     sender,
-                    metadata.currency0,
-                    metadata.currency1,
+                    currency0Display,
+                    currency1Display,
                     formatFee(metadata.fee),
                     metadata.hooks,
                     tickLower,
                     tickUpper,
                     liquidityDelta,
                     salt,
-                    Instant.now());
+                    timestamp);
         } catch (Exception ex) {
             log.error("Failed to handle V4 modify liquidity log", ex);
         }
@@ -494,7 +525,7 @@ public class LiquidityMonitorService {
                 String to = logEntry.getTopics().size() > 2 ? decodeAddress(logEntry.getTopics().get(2)) : "";
                 String pairName = formatPairName(metadataOpt, token0, token1);
                 log.info("POOL_REMOVED pair={} name={} sender={} to={} token0={} token1={} amount0={} amount1={} time={}",
-                        pairAddress, pairName, sender, to, token0, token1, normalized0, normalized1, Instant.now());
+                        pairAddress, pairName, sender, to, token0, token1, normalized0, normalized1, resolveLogTimestamp(logEntry));
                 if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
                     transferMonitorService.removeLiquidityPair(pairAddress);
                 }
@@ -521,7 +552,7 @@ public class LiquidityMonitorService {
                 String pairName = formatPairName(metadataOpt, token0, token1);
                 String feeText = metadataOpt.map(meta -> formatFee(meta.fee)).orElse(formatFee(null));
                 log.info("POOL_REMOVED_V3 pool={} name={} owner={} fee={} priceRange={} token0={} token1={} tickLower={} tickUpper={} burnedLiquidity={} amount0={} amount1={} time={}",
-                        pairAddress, pairName, owner, feeText, priceRange, token0, token1, tickLower, tickUpper, burnedLiquidity, normalized0, normalized1, Instant.now());
+                        pairAddress, pairName, owner, feeText, priceRange, token0, token1, tickLower, tickUpper, burnedLiquidity, normalized0, normalized1, resolveLogTimestamp(logEntry));
                 if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
                     transferMonitorService.removeLiquidityPair(pairAddress);
                 }
@@ -561,7 +592,7 @@ public class LiquidityMonitorService {
                 String sender = logEntry.getTopics().size() > 1 ? decodeAddress(logEntry.getTopics().get(1)) : "";
                 String pairName = formatPairName(metadataOpt, token0, token1);
                 log.info("POOL_ADDED pair={} name={} sender={} token0={} token1={} amount0={} amount1={} time={}",
-                        pairAddress, pairName, sender, token0, token1, normalized0, normalized1, Instant.now());
+                        pairAddress, pairName, sender, token0, token1, normalized0, normalized1, resolveLogTimestamp(logEntry));
             } else if (event.equals(MINT_EVENT_V3)) {
                 List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
                 if (data.size() < 4) {
@@ -586,7 +617,7 @@ public class LiquidityMonitorService {
                 String pairName = formatPairName(metadataOpt, token0, token1);
                 String feeText = metadataOpt.map(meta -> formatFee(meta.fee)).orElse(formatFee(null));
                 log.info("POOL_ADDED_V3 pool={} name={} sender={} owner={} fee={} priceRange={} token0={} token1={} tickLower={} tickUpper={} liquidity={} amount0={} amount1={} time={}",
-                        pairAddress, pairName, sender, owner, feeText, priceRange, token0, token1, tickLower, tickUpper, liquidity, normalized0, normalized1, Instant.now());
+                        pairAddress, pairName, sender, owner, feeText, priceRange, token0, token1, tickLower, tickUpper, liquidity, normalized0, normalized1, resolveLogTimestamp(logEntry));
             }
         } catch (Exception ex) {
             log.error("Failed to handle mint log", ex);
@@ -642,6 +673,9 @@ public class LiquidityMonitorService {
         return "0x" + clean.substring(clean.length() - 40);
     }
 
+    /**
+     * 构建 V4 池子元数据
+     */
     private V4PoolMetadata buildV4Metadata(String manager,
                                            String poolId,
                                            String currency0,
@@ -660,6 +694,9 @@ public class LiquidityMonitorService {
                 symbol1);
     }
 
+    /**
+     * 归一化池子 ID
+     */
     private String normalizePoolId(String poolId) {
         if (poolId == null) {
             return null;
@@ -671,6 +708,9 @@ public class LiquidityMonitorService {
         return clean;
     }
 
+    /**
+     * 归一化地址
+     */
     private String normalizeAddress(String address) {
         if (address == null) {
             return null;
@@ -682,6 +722,9 @@ public class LiquidityMonitorService {
         return clean;
     }
 
+    /**
+     * 获取 V4 订阅起始区块参数
+     */
     private DefaultBlockParameter getV4StartBlockParameter() {
         if (tokenCreationBlock != null && tokenCreationBlock.signum() >= 0) {
             return DefaultBlockParameter.valueOf(tokenCreationBlock);
@@ -689,6 +732,9 @@ public class LiquidityMonitorService {
         return DefaultBlockParameterName.EARLIEST;
     }
 
+    /**
+     * 准备历史日志订阅
+     */
     private DefaultBlockParameter prepareHistoricalSubscription(String contractAddress,
                                                                 Event event,
                                                                 List<String> optionalTopics,
@@ -711,6 +757,9 @@ public class LiquidityMonitorService {
         return DefaultBlockParameter.valueOf(nextStart);
     }
 
+    /**
+     * 解析起始区块高度
+     */
     private BigInteger resolveStartBlock(DefaultBlockParameter startParameter) {
         if (startParameter instanceof DefaultBlockParameterNumber) {
             return ((DefaultBlockParameterNumber) startParameter).getBlockNumber();
@@ -721,6 +770,9 @@ public class LiquidityMonitorService {
         return null;
     }
 
+    /**
+     * 获取最新区块高度
+     */
     private BigInteger fetchLatestBlockNumber() {
         try {
             return web3j.ethBlockNumber().send().getBlockNumber();
@@ -730,6 +782,9 @@ public class LiquidityMonitorService {
         }
     }
 
+    /**
+     * 分段拉取历史日志
+     */
     private BigInteger fetchHistoricalLogsInChunks(String contractAddress,
                                                    Event event,
                                                    List<String> optionalTopics,
@@ -781,16 +836,103 @@ public class LiquidityMonitorService {
         return latestBlock;
     }
 
+    /**
+     * 解析日志对应的时间
+     *
+     * @param logEntry 日志
+     * @return 日志时间
+     */
+    private Instant resolveLogTimestamp(Log logEntry) {
+        if (logEntry == null) {
+            return Instant.now();
+        }
+        BigInteger blockNumber = logEntry.getBlockNumber();
+        if (blockNumber == null) {
+            return Instant.now();
+        }
+        Instant cached = blockTimestampCache.get(blockNumber);
+        if (cached != null) {
+            return cached;
+        }
+        Instant resolved = fetchBlockTimestamp(blockNumber).orElse(Instant.now());
+        blockTimestampCache.putIfAbsent(blockNumber, resolved);
+        return resolved;
+    }
+
+    /**
+     * 获取区块时间戳
+     *
+     * @param blockNumber 区块高度
+     * @return 时间戳
+     */
+    private Optional<Instant> fetchBlockTimestamp(BigInteger blockNumber) {
+        try {
+            EthBlock block = web3j.ethGetBlockByNumber(DefaultBlockParameter.valueOf(blockNumber), false).send();
+            if (block.getBlock() == null || block.getBlock().getTimestamp() == null) {
+                return Optional.empty();
+            }
+            return Optional.of(Instant.ofEpochSecond(block.getBlock().getTimestamp().longValue()));
+        } catch (IOException e) {
+            log.error("Failed to fetch block timestamp", e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 格式化货币展示文本
+     *
+     * @param symbol  货币符号
+     * @param address 货币地址
+     * @return 展示文本
+     */
+    private String formatCurrencyDisplay(String symbol, String address) {
+        String normalized = normalizeAddress(address);
+        if (normalized == null) {
+            return (symbol != null && !symbol.isBlank()) ? symbol : "unknown";
+        }
+        if (isZeroAddress(normalized)) {
+            return "BNB(" + normalized + ")";
+        }
+        if (symbol != null && !symbol.isBlank()) {
+            return symbol + "(" + normalized + ")";
+        }
+        return normalized;
+    }
+
+    /**
+     * 判断是否为零地址
+     *
+     * @param address 地址
+     * @return 是否为零地址
+     */
+    private boolean isZeroAddress(String address) {
+        return address != null && address.matches("0x0{40}");
+    }
+
+    /**
+     * V4 池子元数据
+     */
     private static class V4PoolMetadata {
+        /** 管理员地址 */
         private final String manager;
+        /** 池子 ID */
         private final String poolId;
+        /** 货币 0 地址 */
         private final String currency0;
+        /** 货币 1 地址 */
         private final String currency1;
+        /** 手续费 */
         private final BigInteger fee;
+        /** 钩子地址 */
         private final String hooks;
+        /** 货币 0 符号 */
         private final String currency0Symbol;
+        /** 货币 1 符号 */
         private final String currency1Symbol;
 
+        /**
+         * 构造函数
+         */
         private V4PoolMetadata(String manager,
                                String poolId,
                                String currency0,
@@ -809,6 +951,9 @@ public class LiquidityMonitorService {
             this.currency1Symbol = currency1Symbol;
         }
 
+        /**
+         * 获取显示名称
+         */
         private String getDisplayName() {
             String symbol0 = currency0Symbol != null ? currency0Symbol : currency0;
             String symbol1 = currency1Symbol != null ? currency1Symbol : currency1;
@@ -816,12 +961,18 @@ public class LiquidityMonitorService {
         }
     }
 
+    /**
+     * 格式化池子名称
+     */
     private String formatPairName(Optional<DexPriceService.PairMetadata> metadataOpt, String token0, String token1) {
         return metadataOpt
                 .map(DexPriceService.PairMetadata::getDisplayName)
                 .orElse((token0 + "-" + token1).toLowerCase(Locale.ROOT));
     }
 
+    /**
+     * 格式化手续费
+     */
     private String formatFee(BigInteger fee) {
         if (fee == null) {
             return "unknown";
@@ -831,12 +982,18 @@ public class LiquidityMonitorService {
         return normalized.toPlainString() + "%";
     }
 
+    /**
+     * 格式化价格区间
+     */
     private String formatPriceRange(Optional<DexPriceService.PriceRange> rangeOpt) {
         return rangeOpt
                 .map(range -> String.format("[%s, %s]", formatDecimal(range.lower), formatDecimal(range.upper)))
                 .orElse("[]");
     }
 
+    /**
+     * 格式化十进制数
+     */
     private String formatDecimal(BigDecimal value) {
         BigDecimal scaled = value.setScale(6, RoundingMode.HALF_UP);
         BigDecimal normalized = scaled.stripTrailingZeros();
