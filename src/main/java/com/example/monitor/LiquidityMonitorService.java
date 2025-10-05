@@ -27,6 +27,7 @@ import org.web3j.protocol.core.methods.response.EthLog;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.math.MathContext;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.Arrays;
@@ -68,6 +69,8 @@ public class LiquidityMonitorService {
     private final BigInteger tokenCreationBlock;
     /** 日志查询单次最大区块跨度 */
     private static final BigInteger MAX_LOG_BLOCK_RANGE = BigInteger.valueOf(50_000L);
+    /** 价格计算精度 */
+    private static final MathContext PRICE_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
 
     /** V2 PairCreated 事件 */
     private static final Event PAIR_CREATED_EVENT = new Event("PairCreated",
@@ -346,7 +349,18 @@ public class LiquidityMonitorService {
                 Instant timestamp = resolveLogTimestamp(logEntry);
                 String currency0Display = formatCurrencyDisplay(metadata.currency0Symbol, currency0);
                 String currency1Display = formatCurrencyDisplay(metadata.currency1Symbol, currency1);
-                log.info("POOL_INITIALIZED_V4 manager={} poolId={} name={} currency0={} currency1={} fee={} hooks={} parameters={} sqrtPriceX96={} tick={} time={}",
+                BigInteger currency0Decimals = priceService.resolveTokenDecimals(currency0);
+                BigInteger currency1Decimals = priceService.resolveTokenDecimals(currency1);
+                Optional<BigDecimal> rawPriceOpt = calculateToken1PerToken0Price(sqrtPriceX96, currency0Decimals, currency1Decimals);
+                Optional<BigDecimal> trackedPriceOpt = calculateTargetPriceFromSqrt(sqrtPriceX96, currency0Decimals, currency1Decimals, currency0, currency1);
+                String rawPriceText = rawPriceOpt.map(this::formatDecimal).orElse("unknown");
+                String inversePriceText = rawPriceOpt
+                        .filter(price -> price.compareTo(BigDecimal.ZERO) > 0)
+                        .map(price -> BigDecimal.ONE.divide(price, 18, RoundingMode.HALF_UP))
+                        .map(this::formatDecimal)
+                        .orElse("unknown");
+                String trackedPriceText = trackedPriceOpt.map(this::formatDecimal).orElse("unknown");
+                log.info("POOL_INITIALIZED_V4 manager={} poolId={} name={} currency0={} currency1={} fee={} hooks={} parameters={} sqrtPriceX96={} tick={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} time={}",
                         factoryAddress,
                         normalizedPoolId,
                         metadata.getDisplayName(),
@@ -357,6 +371,9 @@ public class LiquidityMonitorService {
                         org.web3j.utils.Numeric.toHexString(parameters),
                         sqrtPriceX96,
                         tick,
+                        rawPriceText,
+                        inversePriceText,
+                        trackedPriceText,
                         timestamp);
             }
             subscribeV4ModifyLiquidity(factoryAddress, poolIdTopic);
@@ -424,7 +441,21 @@ public class LiquidityMonitorService {
             Instant timestamp = resolveLogTimestamp(logEntry);
             String currency0Display = formatCurrencyDisplay(metadata.currency0Symbol, metadata.currency0);
             String currency1Display = formatCurrencyDisplay(metadata.currency1Symbol, metadata.currency1);
-            log.info("{} manager={} poolId={} name={} sender={} currency0={} currency1={} fee={} hooks={} tickLower={} tickUpper={} liquidityDelta={} salt={} time={}",
+            BigInteger decimals0 = priceService.resolveTokenDecimals(metadata.currency0);
+            BigInteger decimals1 = priceService.resolveTokenDecimals(metadata.currency1);
+            Optional<DexPriceService.PriceRange> priceRangeOpt = calculateV4PriceRange(metadata, decimals0, decimals1, tickLower, tickUpper);
+            String priceRangeText = formatPriceRange(priceRangeOpt);
+            Optional<LiquidityEstimation> estimationOpt = estimateV4LiquidityDelta(liquidityDelta, tickLower, tickUpper, decimals0, decimals1);
+            BigDecimal amount0Signed = estimationOpt.map(est -> applySign(est.amount0, sign)).orElse(null);
+            BigDecimal amount1Signed = estimationOpt.map(est -> applySign(est.amount1, sign)).orElse(null);
+            String amount0Text = amount0Signed != null ? formatDecimal(amount0Signed) : "unknown";
+            String amount1Text = amount1Signed != null ? formatDecimal(amount1Signed) : "unknown";
+            String averagePriceText = priceRangeOpt
+                    .map(range -> range.lower.add(range.upper, PRICE_CONTEXT)
+                            .divide(BigDecimal.valueOf(2), 18, RoundingMode.HALF_UP))
+                    .map(this::formatDecimal)
+                    .orElse("unknown");
+            log.info("{} manager={} poolId={} name={} sender={} currency0={} currency1={} fee={} hooks={} tickLower={} tickUpper={} liquidityDelta={} amount0Delta={} amount1Delta={} priceRange={} avgPrice={} salt={} time={}",
                     action,
                     metadata.manager,
                     metadata.poolId,
@@ -437,6 +468,10 @@ public class LiquidityMonitorService {
                     tickLower,
                     tickUpper,
                     liquidityDelta,
+                    amount0Text,
+                    amount1Text,
+                    priceRangeText,
+                    averagePriceText,
                     salt,
                     timestamp);
         } catch (Exception ex) {
@@ -649,15 +684,45 @@ public class LiquidityMonitorService {
         String normalized = metadata.pairAddress.toLowerCase();
         if (registeredPools.add(normalized)) {
             transferMonitorService.addLiquidityPair(metadata.pairAddress);
+            Optional<DexPriceService.PoolSnapshot> snapshotOpt = priceService.loadPoolSnapshot(metadata);
+            String amount0Text = snapshotOpt.map(snapshot -> snapshot.token0Amount)
+                    .map(this::formatDecimal)
+                    .orElse("unknown");
+            String amount1Text = snapshotOpt.map(snapshot -> snapshot.token1Amount)
+                    .map(this::formatDecimal)
+                    .orElse("unknown");
+            String priceText = snapshotOpt
+                    .flatMap(snapshot -> snapshot.priceForToken(tokenAddress, metadata))
+                    .map(this::formatDecimal)
+                    .orElse("unknown");
+            String swapName = metadata.getSwapName();
             if (metadata.poolType == DexPriceService.PoolType.V3) {
-                log.info("POOL_REGISTERED pair={} name={} fee={}",
+                Optional<DexPriceService.PriceRange> priceRangeOpt = snapshotOpt
+                        .filter(snapshot -> snapshot.currentTick != null && snapshot.tickSpacing != null)
+                        .map(snapshot -> priceService.calculateTargetPriceRange(metadata,
+                                snapshot.currentTick - snapshot.tickSpacing,
+                                snapshot.currentTick + snapshot.tickSpacing))
+                        .orElse(Optional.empty());
+                String priceRangeText = formatPriceRange(priceRangeOpt);
+                log.info("POOL_REGISTERED pair={} swap={} name={} fee={} amount0={} amount1={} price={} priceRange={} tick={} tickSpacing={}",
                         metadata.pairAddress,
+                        swapName,
                         metadata.getDisplayName(),
-                        formatFee(metadata.fee));
+                        formatFee(metadata.fee),
+                        amount0Text,
+                        amount1Text,
+                        priceText,
+                        priceRangeText,
+                        snapshotOpt.map(snapshot -> snapshot.currentTick).map(String::valueOf).orElse("unknown"),
+                        snapshotOpt.map(snapshot -> snapshot.tickSpacing).map(String::valueOf).orElse("unknown"));
             } else {
-                log.info("POOL_REGISTERED pair={} name={}",
+                log.info("POOL_REGISTERED pair={} swap={} name={} amount0={} amount1={} price={}",
                         metadata.pairAddress,
-                        metadata.getDisplayName());
+                        swapName,
+                        metadata.getDisplayName(),
+                        amount0Text,
+                        amount1Text,
+                        priceText);
             }
         }
     }
@@ -897,6 +962,231 @@ public class LiquidityMonitorService {
             return symbol + "(" + normalized + ")";
         }
         return normalized;
+    }
+
+    /**
+     * 计算 V4 价格区间
+     *
+     * @param metadata  池子元数据
+     * @param decimals0 货币 0 精度
+     * @param decimals1 货币 1 精度
+     * @param tickLower 下界 tick
+     * @param tickUpper 上界 tick
+     * @return 价格区间
+     */
+    private Optional<DexPriceService.PriceRange> calculateV4PriceRange(V4PoolMetadata metadata,
+                                                                       BigInteger decimals0,
+                                                                       BigInteger decimals1,
+                                                                       int tickLower,
+                                                                       int tickUpper) {
+        if (metadata == null) {
+            return Optional.empty();
+        }
+        String swapName = Optional.ofNullable(metadata.manager)
+                .map(address -> DexConstants.FACTORY_NAMES.getOrDefault(address.toLowerCase(Locale.ROOT), address))
+                .orElse("unknown");
+        DexPriceService.PairMetadata pseudo = new DexPriceService.PairMetadata(
+                metadata.poolId,
+                metadata.currency0,
+                metadata.currency1,
+                decimals0,
+                decimals1,
+                metadata.currency0Symbol,
+                metadata.currency1Symbol,
+                DexPriceService.PoolType.V3,
+                metadata.fee,
+                metadata.manager,
+                swapName);
+        return priceService.calculateTargetPriceRange(pseudo, tickLower, tickUpper);
+    }
+
+    /**
+     * 估算 V4 流动性变化对应的代币数量
+     *
+     * @param liquidityDelta 流动性变化量
+     * @param tickLower      下界 tick
+     * @param tickUpper      上界 tick
+     * @param decimals0      货币 0 精度
+     * @param decimals1      货币 1 精度
+     * @return 估算结果
+     */
+    private Optional<LiquidityEstimation> estimateV4LiquidityDelta(BigInteger liquidityDelta,
+                                                                   int tickLower,
+                                                                   int tickUpper,
+                                                                   BigInteger decimals0,
+                                                                   BigInteger decimals1) {
+        if (liquidityDelta == null || liquidityDelta.equals(BigInteger.ZERO)) {
+            return Optional.empty();
+        }
+        BigDecimal sqrtLower = sqrtRatioAtTick(tickLower);
+        BigDecimal sqrtUpper = sqrtRatioAtTick(tickUpper);
+        if (sqrtLower == null || sqrtUpper == null
+                || sqrtLower.compareTo(BigDecimal.ZERO) <= 0
+                || sqrtUpper.compareTo(BigDecimal.ZERO) <= 0) {
+            return Optional.empty();
+        }
+        BigDecimal sqrtCurrent = sqrtRatioAtTick((tickLower + tickUpper) / 2);
+        BigDecimal liquidity = new BigDecimal(liquidityDelta.abs());
+        BigDecimal amount0Raw;
+        BigDecimal amount1Raw;
+        if (sqrtCurrent.compareTo(sqrtLower) <= 0) {
+            BigDecimal numerator = liquidity.multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
+            BigDecimal denominator = sqrtUpper.multiply(sqrtLower, PRICE_CONTEXT);
+            amount0Raw = numerator.divide(denominator, 18, RoundingMode.HALF_UP);
+            amount1Raw = BigDecimal.ZERO;
+        } else if (sqrtCurrent.compareTo(sqrtUpper) >= 0) {
+            amount0Raw = BigDecimal.ZERO;
+            amount1Raw = liquidity.multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
+        } else {
+            BigDecimal numerator0 = liquidity.multiply(sqrtUpper.subtract(sqrtCurrent, PRICE_CONTEXT), PRICE_CONTEXT);
+            BigDecimal denominator0 = sqrtCurrent.multiply(sqrtUpper, PRICE_CONTEXT);
+            amount0Raw = numerator0.divide(denominator0, 18, RoundingMode.HALF_UP);
+            amount1Raw = liquidity.multiply(sqrtCurrent.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
+        }
+        BigDecimal normalized0 = normalizeTokenAmount(amount0Raw, decimals0);
+        BigDecimal normalized1 = normalizeTokenAmount(amount1Raw, decimals1);
+        return Optional.of(new LiquidityEstimation(normalized0, normalized1));
+    }
+
+    /**
+     * 归一化代币数量
+     *
+     * @param amount   原始数量
+     * @param decimals 精度
+     * @return 标准化数量
+     */
+    private BigDecimal normalizeTokenAmount(BigDecimal amount, BigInteger decimals) {
+        if (amount == null) {
+            return null;
+        }
+        int scale = decimals != null ? decimals.intValue() : 18;
+        if (scale < 0) {
+            scale = 0;
+        }
+        BigDecimal divisor = BigDecimal.TEN.pow(scale);
+        if (divisor.compareTo(BigDecimal.ZERO) == 0) {
+            return null;
+        }
+        return amount.divide(divisor, 18, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 为数值应用符号
+     *
+     * @param amount 数值
+     * @param sign   符号
+     * @return 带符号的数值
+     */
+    private BigDecimal applySign(BigDecimal amount, int sign) {
+        if (amount == null) {
+            return null;
+        }
+        if (sign == 0) {
+            return BigDecimal.ZERO;
+        }
+        return amount.multiply(BigDecimal.valueOf(sign));
+    }
+
+    /**
+     * 根据 sqrtPriceX96 计算 token1/token0 价格
+     *
+     * @param sqrtPriceX96 sqrtPrice 值
+     * @param decimals0    货币 0 精度
+     * @param decimals1    货币 1 精度
+     * @return 价格
+     */
+    private Optional<BigDecimal> calculateToken1PerToken0Price(BigInteger sqrtPriceX96,
+                                                               BigInteger decimals0,
+                                                               BigInteger decimals1) {
+        if (sqrtPriceX96 == null || sqrtPriceX96.equals(BigInteger.ZERO)) {
+            return Optional.empty();
+        }
+        BigDecimal sqrtPrice = new BigDecimal(sqrtPriceX96);
+        BigDecimal numerator = sqrtPrice.multiply(sqrtPrice, PRICE_CONTEXT);
+        BigDecimal denominator = new BigDecimal(BigInteger.ONE.shiftLeft(192));
+        BigDecimal ratio = numerator.divide(denominator, 18, RoundingMode.HALF_UP);
+        return Optional.of(adjustForDecimals(ratio, decimals0, decimals1));
+    }
+
+    /**
+     * 计算目标代币价格
+     *
+     * @param sqrtPriceX96 sqrtPrice 值
+     * @param decimals0    货币 0 精度
+     * @param decimals1    货币 1 精度
+     * @param currency0    货币 0 地址
+     * @param currency1    货币 1 地址
+     * @return 目标代币价格
+     */
+    private Optional<BigDecimal> calculateTargetPriceFromSqrt(BigInteger sqrtPriceX96,
+                                                              BigInteger decimals0,
+                                                              BigInteger decimals1,
+                                                              String currency0,
+                                                              String currency1) {
+        Optional<BigDecimal> rawPriceOpt = calculateToken1PerToken0Price(sqrtPriceX96, decimals0, decimals1);
+        if (!rawPriceOpt.isPresent()) {
+            return Optional.empty();
+        }
+        BigDecimal rawPrice = rawPriceOpt.get();
+        if (currency0 != null && currency0.equalsIgnoreCase(tokenAddress)) {
+            return Optional.of(rawPrice);
+        }
+        if (currency1 != null && currency1.equalsIgnoreCase(tokenAddress) && rawPrice.compareTo(BigDecimal.ZERO) > 0) {
+            return Optional.of(BigDecimal.ONE.divide(rawPrice, 18, RoundingMode.HALF_UP));
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * 根据精度调整价格
+     *
+     * @param price     原始价格
+     * @param decimals0 货币 0 精度
+     * @param decimals1 货币 1 精度
+     * @return 调整后的价格
+     */
+    private BigDecimal adjustForDecimals(BigDecimal price, BigInteger decimals0, BigInteger decimals1) {
+        if (price == null) {
+            return null;
+        }
+        int scale0 = decimals0 != null ? decimals0.intValue() : 18;
+        int scale1 = decimals1 != null ? decimals1.intValue() : 18;
+        int diff = scale0 - scale1;
+        if (diff == 0) {
+            return price;
+        }
+        BigDecimal factor = BigDecimal.TEN.pow(Math.abs(diff));
+        if (diff > 0) {
+            return price.multiply(factor, PRICE_CONTEXT);
+        }
+        return price.divide(factor, PRICE_CONTEXT);
+    }
+
+    /**
+     * 根据 tick 计算对应的 sqrt 价格
+     *
+     * @param tick tick 值
+     * @return sqrt 价格
+     */
+    private BigDecimal sqrtRatioAtTick(int tick) {
+        double exponent = tick / 2.0d;
+        double value = Math.pow(1.0001d, exponent);
+        return new BigDecimal(Double.toString(value), PRICE_CONTEXT);
+    }
+
+    /**
+     * 流动性估算结果
+     */
+    private static class LiquidityEstimation {
+        /** 货币 0 数量 */
+        private final BigDecimal amount0;
+        /** 货币 1 数量 */
+        private final BigDecimal amount1;
+
+        private LiquidityEstimation(BigDecimal amount0, BigDecimal amount1) {
+            this.amount0 = amount0;
+            this.amount1 = amount1;
+        }
     }
 
     /**

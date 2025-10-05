@@ -108,6 +108,14 @@ public class DexPriceService {
         return Optional.empty();
     }
 
+    /**
+     * 获取指定 token 对的最佳价格
+     *
+     * @param baseToken  基础代币
+     * @param quoteToken 报价代币
+     * @param blockNumber 区块高度
+     * @return 价格
+     */
     private Optional<BigDecimal> getBestPriceForPair(String baseToken, String quoteToken, BigInteger blockNumber) {
         List<PairMetadata> v2Pairs = findOrCreatePairs(baseToken, quoteToken);
         Optional<BigDecimal> v2Price = getBestPriceFromPairs(v2Pairs, baseToken, blockNumber);
@@ -118,6 +126,14 @@ public class DexPriceService {
         return getBestPriceFromPairs(v3Pools, baseToken, blockNumber);
     }
 
+    /**
+     * 遍历池子集合获取最佳价格
+     *
+     * @param pairs       池子列表
+     * @param baseToken   基础代币
+     * @param blockNumber 区块高度
+     * @return 价格
+     */
     private Optional<BigDecimal> getBestPriceFromPairs(List<PairMetadata> pairs, String baseToken, BigInteger blockNumber) {
         for (PairMetadata metadata : pairs) {
             Optional<BigDecimal> price = calculatePrice(metadata, baseToken, blockNumber);
@@ -128,6 +144,13 @@ public class DexPriceService {
         return Optional.empty();
     }
 
+    /**
+     * 合并两段价格路径
+     *
+     * @param first  第一路径
+     * @param second 第二路径
+     * @return 合并价格
+     */
     private Optional<BigDecimal> combinePrices(Optional<BigDecimal> first, Optional<BigDecimal> second) {
         if (first.isPresent() && second.isPresent()) {
             BigDecimal combined = first.get().multiply(second.get(), PRICE_MATH_CONTEXT);
@@ -136,6 +159,14 @@ public class DexPriceService {
         return Optional.empty();
     }
 
+    /**
+     * 计算指定池子的价格
+     *
+     * @param metadata    池子信息
+     * @param baseToken   基础代币
+     * @param blockNumber 区块高度
+     * @return 价格
+     */
     private Optional<BigDecimal> calculatePrice(PairMetadata metadata, String baseToken, BigInteger blockNumber) {
         if (metadata == null) {
             return Optional.empty();
@@ -222,6 +253,14 @@ public class DexPriceService {
         return Optional.empty();
     }
 
+    /**
+     * 计算 V3 池子价格
+     *
+     * @param pairMetadata 池子信息
+     * @param baseToken    基础代币
+     * @param blockNumber  区块高度
+     * @return 价格
+     */
     private Optional<BigDecimal> calculateV3Price(PairMetadata pairMetadata, String baseToken, BigInteger blockNumber) {
         Optional<Slot0Data> slot0Opt = getSlot0(pairMetadata, blockNumber);
         if (!slot0Opt.isPresent()) {
@@ -248,6 +287,13 @@ public class DexPriceService {
         return Optional.empty();
     }
 
+    /**
+     * 查询 slot0 数据
+     *
+     * @param pairMetadata 池子信息
+     * @param blockNumber  区块高度
+     * @return slot0 数据
+     */
     private Optional<Slot0Data> getSlot0(PairMetadata pairMetadata, BigInteger blockNumber) {
         Function function = new Function(
                 "slot0",
@@ -290,6 +336,14 @@ public class DexPriceService {
         }
     }
 
+    /**
+     * 根据精度调整价格
+     *
+     * @param price           原始价格
+     * @param token0Decimals token0 精度
+     * @param token1Decimals token1 精度
+     * @return 调整后的价格
+     */
     private BigDecimal adjustForDecimals(BigDecimal price, BigInteger token0Decimals, BigInteger token1Decimals) {
         int diff = token0Decimals.intValue() - token1Decimals.intValue();
         if (diff == 0) {
@@ -302,6 +356,13 @@ public class DexPriceService {
         return price.divide(factor, PRICE_MATH_CONTEXT);
     }
 
+    /**
+     * 根据 tick 计算价格
+     *
+     * @param tick     tick 值
+     * @param metadata 池子信息
+     * @return 价格
+     */
     private BigDecimal priceFromTick(int tick, PairMetadata metadata) {
         BigDecimal result = BigDecimal.ONE;
         BigDecimal base = BigDecimal.valueOf(1.0001);
@@ -320,6 +381,14 @@ public class DexPriceService {
         return result;
     }
 
+    /**
+     * 计算目标代币在给定 tick 区间内的价格范围
+     *
+     * @param metadata  池子信息
+     * @param tickLower 下界 tick
+     * @param tickUpper 上界 tick
+     * @return 价格区间
+     */
     public Optional<PriceRange> calculateTargetPriceRange(PairMetadata metadata, int tickLower, int tickUpper) {
         if (metadata == null || metadata.poolType != PoolType.V3) {
             return Optional.empty();
@@ -412,6 +481,13 @@ public class DexPriceService {
         return pools;
     }
 
+    /**
+     * 查找或创建任意费率的 V3 池子
+     *
+     * @param tokenA 代币 A
+     * @param tokenB 代币 B
+     * @return 池子信息
+     */
     public Optional<PairMetadata> findOrCreateV3Pool(String tokenA, String tokenB) {
         return findOrCreateV3Pools(tokenA, tokenB).stream().findFirst();
     }
@@ -463,14 +539,38 @@ public class DexPriceService {
         return loadPairMetadata(pairAddress, true, PoolType.V2, null);
     }
 
+    /**
+     * 加载池子元数据
+     *
+     * @param pairAddress    池子地址
+     * @param cacheByTokens  是否按 token 缓存
+     * @return 元数据
+     */
     public Optional<PairMetadata> loadPairMetadata(String pairAddress, boolean cacheByTokens) {
         return loadPairMetadata(pairAddress, cacheByTokens, PoolType.V2, null);
     }
 
+    /**
+     * 加载池子元数据
+     *
+     * @param pairAddress    池子地址
+     * @param cacheByTokens  是否按 token 缓存
+     * @param poolType       池子类型
+     * @return 元数据
+     */
     public Optional<PairMetadata> loadPairMetadata(String pairAddress, boolean cacheByTokens, PoolType poolType) {
         return loadPairMetadata(pairAddress, cacheByTokens, poolType, null);
     }
 
+    /**
+     * 加载池子元数据
+     *
+     * @param pairAddress    池子地址
+     * @param cacheByTokens  是否按 token 缓存
+     * @param poolType       池子类型
+     * @param fee            费率
+     * @return 元数据
+     */
     public Optional<PairMetadata> loadPairMetadata(String pairAddress, boolean cacheByTokens, PoolType poolType, BigInteger fee) {
         String normalizedAddress = normalize(pairAddress);
         PairMetadata existing = pairCacheByAddress.get(normalizedAddress);
@@ -499,7 +599,9 @@ public class DexPriceService {
             BigInteger token1Decimals = fetchDecimals(token1);
             String token0Symbol = fetchSymbol(token0);
             String token1Symbol = fetchSymbol(token1);
-            PairMetadata metadata = new PairMetadata(pairAddress, token0, token1, token0Decimals, token1Decimals, token0Symbol, token1Symbol, poolType, fee);
+            String factoryAddress = callAddressFunction(pairAddress, "factory");
+            String swapName = resolveFactoryName(factoryAddress);
+            PairMetadata metadata = new PairMetadata(pairAddress, token0, token1, token0Decimals, token1Decimals, token0Symbol, token1Symbol, poolType, fee, factoryAddress, swapName);
             if (metadata.poolType == PoolType.V3 && metadata.fee == null) {
                 metadata = metadata.withFee(fetchFee(pairAddress));
             }
@@ -529,6 +631,13 @@ public class DexPriceService {
         }
     }
 
+    /**
+     * 将池子加入 token 缓存
+     *
+     * @param tokenA    代币 A
+     * @param tokenB    代币 B
+     * @param metadata  池子信息
+     */
     private void addPairToTokenCache(String tokenA, String tokenB, PairMetadata metadata) {
         String key = buildPairKey(tokenA, tokenB);
         pairCacheByTokens.compute(key, (k, list) -> {
@@ -589,12 +698,37 @@ public class DexPriceService {
                 tokenInfoService.loadDecimals(token).orElse(BigInteger.valueOf(18)));
     }
 
+    /**
+     * 查询代币符号
+     *
+     * @param token 代币地址
+     * @return 代币符号
+     */
     private String fetchSymbol(String token) {
         String normalized = normalize(token);
         return symbolCache.computeIfAbsent(normalized, key ->
                 tokenInfoService.loadSymbol(token).orElse(normalized));
     }
 
+    /**
+     * 解析工厂名称
+     *
+     * @param factoryAddress 工厂地址
+     * @return 交易所名称
+     */
+    private String resolveFactoryName(String factoryAddress) {
+        if (factoryAddress == null) {
+            return null;
+        }
+        return DexConstants.FACTORY_NAMES.get(factoryAddress.toLowerCase(Locale.ROOT));
+    }
+
+    /**
+     * 查询池子费率
+     *
+     * @param poolAddress 池子地址
+     * @return 费率
+     */
     private BigInteger fetchFee(String poolAddress) {
         Function function = new Function(
                 "fee",
@@ -618,6 +752,125 @@ public class DexPriceService {
             log.error("Failed to fetch fee for pool {}", poolAddress, e);
             return null;
         }
+    }
+
+    /**
+     * 查询池子持有的代币余额并转换为标准精度
+     *
+     * @param tokenAddress 代币地址
+     * @param decimals     代币精度
+     * @param holder       池子地址
+     * @return 标准化余额
+     */
+    private Optional<BigDecimal> fetchTokenBalance(String tokenAddress, BigInteger decimals, String holder) {
+        if (tokenAddress == null || holder == null) {
+            return Optional.empty();
+        }
+        Optional<BigInteger> balanceOpt = tokenInfoService.loadBalance(tokenAddress, holder);
+        if (!balanceOpt.isPresent()) {
+            return Optional.empty();
+        }
+        int scale = decimals != null ? decimals.intValue() : 18;
+        if (scale < 0) {
+            scale = 0;
+        }
+        BigDecimal divisor = BigDecimal.TEN.pow(scale);
+        if (divisor.compareTo(BigDecimal.ZERO) == 0) {
+            return Optional.empty();
+        }
+        BigDecimal normalized = new BigDecimal(balanceOpt.get())
+                .divide(divisor, 18, RoundingMode.HALF_UP);
+        return Optional.of(normalized);
+    }
+
+    /**
+     * 查询 V3 池子的 tickSpacing
+     *
+     * @param metadata 池子元数据
+     * @return tickSpacing
+     */
+    private Optional<Integer> fetchTickSpacing(PairMetadata metadata) {
+        if (metadata == null || metadata.poolType != PoolType.V3) {
+            return Optional.empty();
+        }
+        Function function = new Function(
+                "tickSpacing",
+                Collections.emptyList(),
+                Collections.singletonList(new TypeReference<Int24>() {
+                })
+        );
+        String data = FunctionEncoder.encode(function);
+        Transaction tx = Transaction.createEthCallTransaction(null, metadata.pairAddress, data);
+        try {
+            EthCall response = web3j.ethCall(tx, DefaultBlockParameterName.LATEST).send();
+            if (response.isReverted()) {
+                return Optional.empty();
+            }
+            List<Type> values = FunctionReturnDecoder.decode(response.getValue(), function.getOutputParameters());
+            if (values.isEmpty()) {
+                return Optional.empty();
+            }
+            return Optional.of(((Int24) values.get(0)).getValue().intValue());
+        } catch (IOException e) {
+            log.error("Failed to query tickSpacing for pool {}", metadata.pairAddress, e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 查询最新区块高度
+     *
+     * @return 最新区块
+     */
+    private Optional<BigInteger> fetchLatestBlockNumber() {
+        try {
+            return Optional.ofNullable(web3j.ethBlockNumber().send().getBlockNumber());
+        } catch (IOException e) {
+            log.error("Failed to fetch latest block number", e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 加载池子当前快照信息
+     *
+     * @param metadata 池子元数据
+     * @return 池子快照
+     */
+    public Optional<PoolSnapshot> loadPoolSnapshot(PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return Optional.empty();
+        }
+        Optional<BigDecimal> token0BalanceOpt = fetchTokenBalance(metadata.token0, metadata.token0Decimals, metadata.pairAddress);
+        Optional<BigDecimal> token1BalanceOpt = fetchTokenBalance(metadata.token1, metadata.token1Decimals, metadata.pairAddress);
+        BigDecimal priceToken1PerToken0 = null;
+        if (token0BalanceOpt.isPresent() && token1BalanceOpt.isPresent()
+                && token0BalanceOpt.get().compareTo(BigDecimal.ZERO) > 0) {
+            priceToken1PerToken0 = token1BalanceOpt.get()
+                    .divide(token0BalanceOpt.get(), 18, RoundingMode.HALF_UP);
+        }
+        Integer currentTick = null;
+        BigInteger sqrtPriceX96 = null;
+        Integer tickSpacing = null;
+        if (metadata.poolType == PoolType.V3) {
+            Optional<BigInteger> blockNumberOpt = fetchLatestBlockNumber();
+            if (blockNumberOpt.isPresent()) {
+                Optional<Slot0Data> slot0Opt = getSlot0(metadata, blockNumberOpt.get());
+                if (slot0Opt.isPresent()) {
+                    Slot0Data slot0 = slot0Opt.get();
+                    currentTick = slot0.tick;
+                    sqrtPriceX96 = slot0.sqrtPriceX96;
+                }
+            }
+            tickSpacing = fetchTickSpacing(metadata).orElse(null);
+        }
+        return Optional.of(new PoolSnapshot(
+                token0BalanceOpt.orElse(null),
+                token1BalanceOpt.orElse(null),
+                priceToken1PerToken0,
+                currentTick,
+                tickSpacing,
+                sqrtPriceX96));
     }
 
     /**
@@ -653,10 +906,22 @@ public class DexPriceService {
         return address == null ? null : address.toLowerCase();
     }
 
+    /**
+     * 获取代币精度
+     *
+     * @param token 代币地址
+     * @return 精度
+     */
     public BigInteger resolveTokenDecimals(String token) {
         return fetchDecimals(token);
     }
 
+    /**
+     * 获取代币符号
+     *
+     * @param token 代币地址
+     * @return 符号
+     */
     public String resolveTokenSymbol(String token) {
         return fetchSymbol(token);
     }
@@ -710,6 +975,58 @@ public class DexPriceService {
     }
 
     /**
+     * 池子快照数据
+     */
+    public static class PoolSnapshot {
+        /** token0 数量（标准精度） */
+        public final BigDecimal token0Amount;
+        /** token1 数量（标准精度） */
+        public final BigDecimal token1Amount;
+        /** token1/token0 价格 */
+        public final BigDecimal priceToken1PerToken0;
+        /** 当前 tick */
+        public final Integer currentTick;
+        /** tickSpacing */
+        public final Integer tickSpacing;
+        /** 当前 sqrtPriceX96 */
+        public final BigInteger sqrtPriceX96;
+
+        public PoolSnapshot(BigDecimal token0Amount,
+                            BigDecimal token1Amount,
+                            BigDecimal priceToken1PerToken0,
+                            Integer currentTick,
+                            Integer tickSpacing,
+                            BigInteger sqrtPriceX96) {
+            this.token0Amount = token0Amount;
+            this.token1Amount = token1Amount;
+            this.priceToken1PerToken0 = priceToken1PerToken0;
+            this.currentTick = currentTick;
+            this.tickSpacing = tickSpacing;
+            this.sqrtPriceX96 = sqrtPriceX96;
+        }
+
+        /**
+         * 计算指定代币的价格
+         *
+         * @param baseToken 代币地址
+         * @param metadata  池子元数据
+         * @return 价格
+         */
+        public Optional<BigDecimal> priceForToken(String baseToken, PairMetadata metadata) {
+            if (metadata == null || priceToken1PerToken0 == null || baseToken == null) {
+                return Optional.empty();
+            }
+            if (metadata.token0.equalsIgnoreCase(baseToken)) {
+                return Optional.of(priceToken1PerToken0);
+            }
+            if (metadata.token1.equalsIgnoreCase(baseToken) && priceToken1PerToken0.compareTo(BigDecimal.ZERO) > 0) {
+                return Optional.of(BigDecimal.ONE.divide(priceToken1PerToken0, 18, RoundingMode.HALF_UP));
+            }
+            return Optional.empty();
+        }
+    }
+
+    /**
      * 储备数据结构
      */
     private static class Reserves {
@@ -721,17 +1038,32 @@ public class DexPriceService {
             this.reserve1 = reserve1;
         }
 
+        /**
+         * 获取 token0 储备
+         *
+         * @return 储备
+         */
         public BigDecimal getReserve0() {
             return reserve0;
         }
 
+        /**
+         * 获取 token1 储备
+         *
+         * @return 储备
+         */
         public BigDecimal getReserve1() {
             return reserve1;
         }
     }
 
+    /**
+     * slot0 数据结构
+     */
     private static class Slot0Data {
+        /** sqrtPrice 值 */
         private final BigInteger sqrtPriceX96;
+        /** 当前 tick */
         private final int tick;
 
         private Slot0Data(BigInteger sqrtPriceX96, int tick) {
@@ -766,20 +1098,34 @@ public class DexPriceService {
      * 池子元数据
      */
     public static class PairMetadata {
+        /** 池子合约地址 */
         public final String pairAddress;
+        /** token0 地址 */
         public final String token0;
+        /** token1 地址 */
         public final String token1;
+        /** token0 精度 */
         public final BigInteger token0Decimals;
+        /** token1 精度 */
         public final BigInteger token1Decimals;
+        /** token0 符号 */
         public final String token0Symbol;
+        /** token1 符号 */
         public final String token1Symbol;
+        /** 池子类型 */
         public final PoolType poolType;
+        /** 费率 */
         public final BigInteger fee;
+        /** 工厂地址 */
+        public final String factoryAddress;
+        /** 交易所名称 */
+        public final String swapName;
 
         public PairMetadata(String pairAddress, String token0, String token1,
                              BigInteger token0Decimals, BigInteger token1Decimals,
                              String token0Symbol, String token1Symbol,
-                             PoolType poolType, BigInteger fee) {
+                             PoolType poolType, BigInteger fee,
+                             String factoryAddress, String swapName) {
             this.pairAddress = pairAddress;
             this.token0 = token0;
             this.token1 = token1;
@@ -789,6 +1135,8 @@ public class DexPriceService {
             this.token1Symbol = token1Symbol;
             this.poolType = poolType == null ? PoolType.V2 : poolType;
             this.fee = fee;
+            this.factoryAddress = factoryAddress;
+            this.swapName = swapName;
         }
 
         public PairMetadata withPoolType(PoolType poolType) {
@@ -796,7 +1144,7 @@ public class DexPriceService {
                 return this;
             }
             return new PairMetadata(pairAddress, token0, token1, token0Decimals, token1Decimals,
-                    token0Symbol, token1Symbol, poolType, fee);
+                    token0Symbol, token1Symbol, poolType, fee, factoryAddress, swapName);
         }
 
         public PairMetadata withFee(BigInteger fee) {
@@ -804,13 +1152,20 @@ public class DexPriceService {
                 return this;
             }
             return new PairMetadata(pairAddress, token0, token1, token0Decimals, token1Decimals,
-                    token0Symbol, token1Symbol, poolType, fee);
+                    token0Symbol, token1Symbol, poolType, fee, factoryAddress, swapName);
         }
 
         public String getDisplayName() {
             String symbol0 = token0Symbol != null ? token0Symbol : token0;
             String symbol1 = token1Symbol != null ? token1Symbol : token1;
             return symbol0.toLowerCase(java.util.Locale.ROOT) + "-" + symbol1.toLowerCase(java.util.Locale.ROOT);
+        }
+
+        public String getSwapName() {
+            if (swapName != null && !swapName.isBlank()) {
+                return swapName;
+            }
+            return factoryAddress != null ? factoryAddress : "unknown";
         }
     }
 }

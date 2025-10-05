@@ -3,7 +3,10 @@ package com.example.monitor;
 import java.math.BigInteger;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 
 /**
  * DEX 常量配置
@@ -53,6 +56,20 @@ public class DexConstants {
             PANCAKE_V4_FACTORY,
             UNISWAP_V4_FACTORY
     ));
+
+    /** 工厂地址与名称映射 */
+    public static final Map<String, String> FACTORY_NAMES;
+
+    static {
+        Map<String, String> names = new HashMap<>();
+        names.put(PANCAKE_V2_FACTORY.toLowerCase(Locale.ROOT), "PancakeSwap V2");
+        names.put(PANCAKE_V3_FACTORY.toLowerCase(Locale.ROOT), "PancakeSwap V3");
+        names.put(PANCAKE_V4_FACTORY.toLowerCase(Locale.ROOT), "PancakeSwap V4");
+        names.put(UNISWAP_V2_FACTORY.toLowerCase(Locale.ROOT), "Uniswap V2");
+        names.put(UNISWAP_V3_FACTORY.toLowerCase(Locale.ROOT), "Uniswap V3");
+        names.put(UNISWAP_V4_FACTORY.toLowerCase(Locale.ROOT), "Uniswap V4");
+        FACTORY_NAMES = Collections.unmodifiableMap(names);
+    }
 
     private DexConstants() {
     }

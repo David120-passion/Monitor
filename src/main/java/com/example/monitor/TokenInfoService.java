@@ -5,10 +5,12 @@ import org.slf4j.LoggerFactory;
 import org.web3j.abi.FunctionEncoder;
 import org.web3j.abi.FunctionReturnDecoder;
 import org.web3j.abi.TypeReference;
+import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Function;
 import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.Utf8String;
 import org.web3j.abi.datatypes.generated.Uint8;
+import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.DefaultBlockParameterName;
@@ -76,6 +78,28 @@ public class TokenInfoService {
         return callSingleValueReturn(tokenAddress, function)
                 .map(value -> (Utf8String) value)
                 .map(Utf8String::getValue);
+    }
+
+    /**
+     * 查询指定地址的代币余额
+     *
+     * @param tokenAddress 代币合约地址
+     * @param ownerAddress 地址
+     * @return 余额
+     */
+    public Optional<BigInteger> loadBalance(String tokenAddress, String ownerAddress) {
+        if (tokenAddress == null || ownerAddress == null) {
+            return Optional.empty();
+        }
+        Function function = new Function(
+                "balanceOf",
+                Collections.singletonList(new Address(ownerAddress)),
+                Collections.singletonList(new TypeReference<Uint256>() {
+                })
+        );
+        return callSingleValueReturn(tokenAddress, function)
+                .map(value -> (Uint256) value)
+                .map(Uint256::getValue);
     }
 
     /**
