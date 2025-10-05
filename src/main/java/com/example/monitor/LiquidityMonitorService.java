@@ -133,8 +133,8 @@ public class LiquidityMonitorService {
                     TypeReference.create(Uint256.class),
                     TypeReference.create(Uint256.class)
             ));
-    /** V4 Initialize 事件 */
-    private static final Event INITIALIZE_EVENT_V4 = new Event("Initialize",
+    /** PancakeSwap V4 Initialize 事件 */
+    private static final Event INITIALIZE_EVENT_V4_PANCAKE = new Event("Initialize",
             Arrays.asList(
                     TypeReference.create(Bytes32.class, true),
                     TypeReference.create(Address.class),
@@ -144,6 +144,18 @@ public class LiquidityMonitorService {
                     TypeReference.create(Uint160.class),
                     TypeReference.create(Uint24.class),
                     TypeReference.create(Address.class)
+            ));
+    /** Uniswap V4 Initialize 事件 */
+    private static final Event INITIALIZE_EVENT_V4_UNISWAP = new Event("Initialize",
+            Arrays.asList(
+                    TypeReference.create(Bytes32.class, true),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Uint24.class),
+                    TypeReference.create(Int24.class),
+                    TypeReference.create(Address.class),
+                    TypeReference.create(Uint160.class),
+                    TypeReference.create(Int24.class)
             ));
     /** V4 ModifyLiquidity 事件 */
     private static final Event MODIFY_LIQUIDITY_EVENT_V4 = new Event("ModifyLiquidity",
@@ -226,17 +238,29 @@ public class LiquidityMonitorService {
      * @param factoryAddress 工厂合约地址
      */
     private void subscribeV4Factory(String factoryAddress) {
+        Event initEvent = resolveV4InitializeEvent(factoryAddress);
         DefaultBlockParameter subscriptionStart = prepareHistoricalSubscription(
                 factoryAddress,
-                INITIALIZE_EVENT_V4,
+                initEvent,
                 Collections.emptyList(),
                 logEntry -> handleV4InitializeLog(factoryAddress, logEntry),
                 "V4 initialize"
         );
         EthFilter initFilter = new EthFilter(subscriptionStart, DefaultBlockParameterName.LATEST, factoryAddress);
-        initFilter.addSingleTopic(EventEncoder.encode(INITIALIZE_EVENT_V4));
+        initFilter.addSingleTopic(EventEncoder.encode(initEvent));
         web3j.ethLogFlowable(initFilter).subscribe(logEntry -> handleV4InitializeLog(factoryAddress, logEntry), throwable ->
                 log.error("Error processing V4 initialize event", throwable));
+    }
+
+    /**
+     * 根据工厂地址解析对应的 V4 Initialize 事件
+     */
+    private Event resolveV4InitializeEvent(String factoryAddress) {
+        String normalized = normalizeAddress(factoryAddress);
+        if (normalized != null && DexConstants.UNISWAP_V4_FACTORY.equalsIgnoreCase(normalized)) {
+            return INITIALIZE_EVENT_V4_UNISWAP;
+        }
+        return INITIALIZE_EVENT_V4_PANCAKE;
     }
 
     /**
@@ -358,15 +382,32 @@ public class LiquidityMonitorService {
                 return;
             }
             String poolIdTopic = topics.get(1);
-            List<Type> data = decodeEventData(logEntry.getData(), INITIALIZE_EVENT_V4);
-            if (data.size() < 7) {
-                return;
+            Event initEvent = resolveV4InitializeEvent(factoryAddress);
+            List<Type> data = decodeEventData(logEntry.getData(), initEvent);
+            String currency0;
+            String currency1;
+            BigInteger fee;
+            BigInteger sqrtPriceX96;
+            String hooks;
+            if (initEvent == INITIALIZE_EVENT_V4_UNISWAP) {
+                if (topics.size() < 4 || data.size() < 5) {
+                    return;
+                }
+                currency0 = normalizeAddress(decodeAddress(topics.get(2)));
+                currency1 = normalizeAddress(decodeAddress(topics.get(3)));
+                fee = ((Uint24) data.get(0)).getValue();
+                sqrtPriceX96 = ((Uint160) data.get(3)).getValue();
+                hooks = normalizeAddress(((Address) data.get(2)).getValue());
+            } else {
+                if (data.size() < 7) {
+                    return;
+                }
+                currency0 = normalizeAddress(((Address) data.get(0)).getValue());
+                currency1 = normalizeAddress(((Address) data.get(1)).getValue());
+                fee = ((Uint24) data.get(2)).getValue();
+                sqrtPriceX96 = ((Uint160) data.get(4)).getValue();
+                hooks = normalizeAddress(((Address) data.get(6)).getValue());
             }
-            String currency0 = normalizeAddress(((Address) data.get(0)).getValue());
-            String currency1 = normalizeAddress(((Address) data.get(1)).getValue());
-            BigInteger fee = ((Uint24) data.get(2)).getValue();
-            BigInteger sqrtPriceX96 = ((Uint160) data.get(4)).getValue();
-            String hooks = normalizeAddress(((Address) data.get(6)).getValue());
             if (!matchesTarget(currency0, currency1)) {
                 return;
             }
