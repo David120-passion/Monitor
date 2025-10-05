@@ -21,19 +21,23 @@ import org.web3j.crypto.Hash;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.DefaultBlockParameterNumber;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.Log;
+import org.web3j.protocol.core.methods.response.EthLog;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
 /**
  * 流动性池监控服务
@@ -61,6 +65,8 @@ public class LiquidityMonitorService {
     private final Set<String> v4SubscribedPools = ConcurrentHashMap.newKeySet();
     /** 代币创建区块 */
     private final BigInteger tokenCreationBlock;
+    /** 日志查询单次最大区块跨度 */
+    private static final BigInteger MAX_LOG_BLOCK_RANGE = BigInteger.valueOf(50_000L);
 
     /** V2 PairCreated 事件 */
     private static final Event PAIR_CREATED_EVENT = new Event("PairCreated",
@@ -205,7 +211,14 @@ public class LiquidityMonitorService {
     }
 
     private void subscribeV4Factory(String factoryAddress) {
-        EthFilter initFilter = new EthFilter(getV4StartBlockParameter(), DefaultBlockParameterName.LATEST, factoryAddress);
+        DefaultBlockParameter subscriptionStart = prepareHistoricalSubscription(
+                factoryAddress,
+                INITIALIZE_EVENT_V4,
+                Collections.emptyList(),
+                logEntry -> handleV4InitializeLog(factoryAddress, logEntry),
+                "V4 initialize"
+        );
+        EthFilter initFilter = new EthFilter(subscriptionStart, DefaultBlockParameterName.LATEST, factoryAddress);
         initFilter.addSingleTopic(EventEncoder.encode(INITIALIZE_EVENT_V4));
         web3j.ethLogFlowable(initFilter).subscribe(logEntry -> handleV4InitializeLog(factoryAddress, logEntry), throwable ->
                 log.error("Error processing V4 initialize event", throwable));
@@ -351,7 +364,14 @@ public class LiquidityMonitorService {
         if (!v4SubscribedPools.add(normalizedKey)) {
             return;
         }
-        EthFilter modifyFilter = new EthFilter(getV4StartBlockParameter(), DefaultBlockParameterName.LATEST, factoryAddress);
+        DefaultBlockParameter subscriptionStart = prepareHistoricalSubscription(
+                factoryAddress,
+                MODIFY_LIQUIDITY_EVENT_V4,
+                Collections.singletonList(normalizedPoolId),
+                this::handleV4ModifyLiquidityLog,
+                "V4 modify liquidity"
+        );
+        EthFilter modifyFilter = new EthFilter(subscriptionStart, DefaultBlockParameterName.LATEST, factoryAddress);
         modifyFilter.addSingleTopic(EventEncoder.encode(MODIFY_LIQUIDITY_EVENT_V4));
         modifyFilter.addOptionalTopics(normalizedPoolId);
         web3j.ethLogFlowable(modifyFilter).subscribe(logEntry -> handleV4ModifyLiquidityLog(logEntry), throwable ->
@@ -712,6 +732,98 @@ public class LiquidityMonitorService {
             return DefaultBlockParameter.valueOf(tokenCreationBlock);
         }
         return DefaultBlockParameterName.EARLIEST;
+    }
+
+    private DefaultBlockParameter prepareHistoricalSubscription(String contractAddress,
+                                                                Event event,
+                                                                List<String> optionalTopics,
+                                                                Consumer<Log> handler,
+                                                                String context) {
+        DefaultBlockParameter startParameter = getV4StartBlockParameter();
+        BigInteger startBlock = resolveStartBlock(startParameter);
+        BigInteger latestBlock = fetchLatestBlockNumber();
+        if (startBlock == null || latestBlock == null) {
+            return startParameter;
+        }
+        if (latestBlock.subtract(startBlock).compareTo(MAX_LOG_BLOCK_RANGE) <= 0) {
+            return startParameter;
+        }
+        BigInteger nextStart = fetchHistoricalLogsInChunks(contractAddress, event, optionalTopics, handler, context,
+                startBlock, latestBlock);
+        if (nextStart == null) {
+            return startParameter;
+        }
+        return DefaultBlockParameter.valueOf(nextStart);
+    }
+
+    private BigInteger resolveStartBlock(DefaultBlockParameter startParameter) {
+        if (startParameter instanceof DefaultBlockParameterNumber) {
+            return ((DefaultBlockParameterNumber) startParameter).getBlockNumber();
+        }
+        if (startParameter == DefaultBlockParameterName.EARLIEST) {
+            return BigInteger.ZERO;
+        }
+        return null;
+    }
+
+    private BigInteger fetchLatestBlockNumber() {
+        try {
+            return web3j.ethBlockNumber().send().getBlockNumber();
+        } catch (IOException e) {
+            log.error("Failed to fetch latest block number", e);
+            return null;
+        }
+    }
+
+    private BigInteger fetchHistoricalLogsInChunks(String contractAddress,
+                                                   Event event,
+                                                   List<String> optionalTopics,
+                                                   Consumer<Log> handler,
+                                                   String context,
+                                                   BigInteger startBlock,
+                                                   BigInteger latestBlock) {
+        if (startBlock == null || latestBlock == null) {
+            return null;
+        }
+        BigInteger current = startBlock;
+        String eventTopic = EventEncoder.encode(event);
+        while (current.compareTo(latestBlock) <= 0) {
+            BigInteger end = current.add(MAX_LOG_BLOCK_RANGE).subtract(BigInteger.ONE);
+            if (end.compareTo(latestBlock) > 0) {
+                end = latestBlock;
+            }
+            EthFilter filter = new EthFilter(
+                    DefaultBlockParameter.valueOf(current),
+                    DefaultBlockParameter.valueOf(end),
+                    contractAddress
+            );
+            filter.addSingleTopic(eventTopic);
+            if (optionalTopics != null && !optionalTopics.isEmpty()) {
+                filter.addOptionalTopics(optionalTopics.toArray(new String[0]));
+            }
+            try {
+                EthLog response = web3j.ethGetLogs(filter).send();
+                if (response.hasError()) {
+                    log.warn("Failed to fetch {} logs for {} blocks {}-{} error={}",
+                            context,
+                            contractAddress,
+                            current,
+                            end,
+                            response.getError());
+                } else {
+                    for (EthLog.LogResult<?> logResult : response.getLogs()) {
+                        Object raw = logResult.get();
+                        if (raw instanceof Log) {
+                            handler.accept((Log) raw);
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                log.error("Failed to fetch {} logs for {} blocks {}-{}", context, contractAddress, current, end, e);
+            }
+            current = end.add(BigInteger.ONE);
+        }
+        return latestBlock;
     }
 
     private BigDecimal normalizeV4Amount(BigInteger rawAmount, BigInteger decimals) {
