@@ -379,6 +379,11 @@ public class LiquidityMonitorService {
                     hooks);
             V4PoolMetadata previous = v4Pools.putIfAbsent(normalizedPoolId, metadata);
             V4PoolMetadata effectiveMetadata = previous != null ? previous : metadata;
+            if (previous == null) {
+                if (metadata.manager != null) {
+                    transferMonitorService.addLiquidityPair(metadata.manager);
+                }
+            }
             BigInteger currency0Decimals = priceService.resolveTokenDecimals(currency0);
             BigInteger currency1Decimals = priceService.resolveTokenDecimals(currency1);
             Optional<BigDecimal> rawPriceOpt = calculateToken1PerToken0Price(sqrtPriceX96, currency0Decimals, currency1Decimals);
@@ -390,6 +395,7 @@ public class LiquidityMonitorService {
             });
             if (previous == null && state != null) {
                 String timestampText = formatTimestamp(resolveLogTimestamp(logEntry));
+                String swapName = resolveV4SwapName(effectiveMetadata);
                 String rawPriceText = rawPriceOpt.map(this::formatDecimal).orElse("unknown");
                 String inversePriceText = rawPriceOpt
                         .filter(price -> price.compareTo(BigDecimal.ZERO) > 0)
@@ -400,7 +406,8 @@ public class LiquidityMonitorService {
                 String amount0Remaining = formatAmount(state.getAmount0());
                 String amount1Remaining = formatAmount(state.getAmount1());
                 String tvlRemaining = formatTvl(calculateV4Tvl(effectiveMetadata, state));
-                log.info("POOL_INITIALIZED_V4 name={} fee={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} amount0Remaining={} amount1Remaining={} tvlRemaining={} time={}",
+                log.info("POOL_INITIALIZED_V4 swap={} name={} fee={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} amount0Remaining={} amount1Remaining={} tvlRemaining={} time={}",
+                        swapName,
                         effectiveMetadata.getDisplayName(),
                         formatFee(fee),
                         rawPriceText,
@@ -462,6 +469,7 @@ public class LiquidityMonitorService {
             if (metadata == null) {
                 return;
             }
+            transferMonitorService.markLiquidityAdjustmentTx(logEntry.getTransactionHash(), logEntry.getBlockNumber());
             List<Type> data = decodeEventData(logEntry.getData(), MODIFY_LIQUIDITY_EVENT_V4);
             if (data.size() < 4) {
                 return;
@@ -500,8 +508,10 @@ public class LiquidityMonitorService {
             String amount1Remaining = formatAmount(state != null ? state.getAmount1() : null);
             String tvlRemaining = formatTvl(calculateV4Tvl(metadata, state));
             String timestampText = formatTimestamp(timestamp);
-            log.info("{} name={} sender={} fee={}  amount0Delta={} amount1Delta={} priceRange={}  amount0Remaining={} amount1Remaining={} tvlRemaining={}  time={}",
+            String swapName = resolveV4SwapName(metadata);
+            log.info("{} swap={} name={} sender={} fee={}  amount0Delta={} amount1Delta={} priceRange={}  amount0Remaining={} amount1Remaining={} tvlRemaining={}  time={}",
                     action,
+                    swapName,
                     metadata.getDisplayName(),
                     sender,
                     formatFee(metadata.fee),
@@ -575,6 +585,7 @@ public class LiquidityMonitorService {
      */
     private void handleBurnLog(String pairAddress, String token0, String token1, Event event, Log logEntry) {
         try {
+            transferMonitorService.markLiquidityAdjustmentTx(logEntry.getTransactionHash(), logEntry.getBlockNumber());
             DexPriceService.PoolType poolType = event.equals(BURN_EVENT_V2)
                     ? DexPriceService.PoolType.V2
                     : DexPriceService.PoolType.V3;
@@ -645,6 +656,7 @@ public class LiquidityMonitorService {
      */
     private void handleMintLog(String pairAddress, String token0, String token1, Event event, Log logEntry) {
         try {
+            transferMonitorService.markLiquidityAdjustmentTx(logEntry.getTransactionHash(), logEntry.getBlockNumber());
             DexPriceService.PoolType poolType = event.equals(MINT_EVENT_V2)
                     ? DexPriceService.PoolType.V2
                     : DexPriceService.PoolType.V3;

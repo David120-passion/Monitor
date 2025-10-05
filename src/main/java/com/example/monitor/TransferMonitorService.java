@@ -24,6 +24,7 @@ import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -48,6 +49,10 @@ public class TransferMonitorService {
     private final TransferAggregator aggregator;
     /** 已知流动性池地址集合 */
     private final Set<String> liquidityPairs = ConcurrentHashMap.newKeySet();
+    /** 需要忽略买卖统计的流动性调整交易 */
+    private final ConcurrentHashMap<String, BigInteger> liquidityAdjustmentTxs = new ConcurrentHashMap<>();
+    /** 流动性调整交易保留的最大区块跨度 */
+    private static final BigInteger LIQUIDITY_TX_TTL_BLOCKS = BigInteger.valueOf(500L);
 
     /** Transfer 事件定义 */
     private static final Event TRANSFER_EVENT = new Event("Transfer",
@@ -92,6 +97,24 @@ public class TransferMonitorService {
     }
 
     /**
+     * 标记在统计时需要忽略的流动性调整交易
+     *
+     * @param txHash      交易哈希
+     * @param blockNumber 区块高度
+     */
+    public void markLiquidityAdjustmentTx(String txHash, BigInteger blockNumber) {
+        if (txHash == null || txHash.isEmpty()) {
+            return;
+        }
+        if (blockNumber != null) {
+            cleanupOldLiquidityTxs(blockNumber);
+            liquidityAdjustmentTxs.put(txHash.toLowerCase(Locale.ROOT), blockNumber);
+        } else {
+            liquidityAdjustmentTxs.put(txHash.toLowerCase(Locale.ROOT), null);
+        }
+    }
+
+    /**
      * 移除已知流动性池
      *
      * @param pairAddress 池子地址
@@ -128,6 +151,14 @@ public class TransferMonitorService {
             Optional<BigDecimal> priceOpt = priceService.getPriceAtBlock(blockNumber);
             BigDecimal price = priceOpt.orElse(BigDecimal.ZERO);
             BigDecimal usdValue = amount.multiply(price);
+
+            cleanupOldLiquidityTxs(blockNumber);
+
+            String txHash = logEntry.getTransactionHash();
+            if (txHash != null && liquidityAdjustmentTxs.containsKey(txHash.toLowerCase(Locale.ROOT))) {
+                log.debug("Ignoring transfer for liquidity adjustment txHash={}", txHash);
+                return;
+            }
 
             boolean fromPool = liquidityPairs.contains(fromNormalized);
             boolean toPool = liquidityPairs.contains(toNormalized);
@@ -189,5 +220,24 @@ public class TransferMonitorService {
             clean = String.format("%40s", clean).replace(' ', '0');
         }
         return "0x" + clean.substring(clean.length() - 40);
+    }
+
+    /**
+     * 清理过期的流动性调整交易记录
+     *
+     * @param currentBlock 当前处理的区块
+     */
+    private void cleanupOldLiquidityTxs(BigInteger currentBlock) {
+        if (currentBlock == null || liquidityAdjustmentTxs.isEmpty()) {
+            return;
+        }
+        BigInteger threshold = currentBlock.subtract(LIQUIDITY_TX_TTL_BLOCKS);
+        liquidityAdjustmentTxs.entrySet().removeIf(entry -> {
+            BigInteger recordedBlock = entry.getValue();
+            if (recordedBlock == null) {
+                return false;
+            }
+            return recordedBlock.compareTo(threshold) < 0;
+        });
     }
 }
