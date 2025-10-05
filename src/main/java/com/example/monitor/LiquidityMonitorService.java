@@ -671,6 +671,7 @@ public class LiquidityMonitorService {
                     .flatMap(snapshot -> snapshot.priceForToken(tokenAddress, metadata))
                     .map(this::formatDecimal)
                     .orElse("unknown");
+            String tvlText = formatTvl(snapshotOpt.flatMap(snapshot -> calculateTvl(metadata, snapshot)));
             String swapName = metadata.getSwapName();
             if (metadata.poolType == DexPriceService.PoolType.V3) {
                 Optional<DexPriceService.PriceRange> priceRangeOpt = snapshotOpt
@@ -680,7 +681,7 @@ public class LiquidityMonitorService {
                                 snapshot.currentTick + snapshot.tickSpacing))
                         .orElse(Optional.empty());
                 String priceRangeText = formatPriceRange(priceRangeOpt);
-                log.info("POOL_REGISTERED pair={} swap={} name={} fee={} amount0={} amount1={} price={} priceRange={} tick={} tickSpacing={}",
+                log.info("POOL_REGISTERED pair={} swap={} name={} fee={} amount0={} amount1={} price={} priceRange={} tick={} tickSpacing={} tvl={}",
                         metadata.pairAddress,
                         swapName,
                         metadata.getDisplayName(),
@@ -690,15 +691,17 @@ public class LiquidityMonitorService {
                         priceText,
                         priceRangeText,
                         snapshotOpt.map(snapshot -> snapshot.currentTick).map(String::valueOf).orElse("unknown"),
-                        snapshotOpt.map(snapshot -> snapshot.tickSpacing).map(String::valueOf).orElse("unknown"));
+                        snapshotOpt.map(snapshot -> snapshot.tickSpacing).map(String::valueOf).orElse("unknown"),
+                        tvlText);
             } else {
-                log.info("POOL_REGISTERED pair={} swap={} name={} amount0={} amount1={} price={}",
+                log.info("POOL_REGISTERED pair={} swap={} name={} amount0={} amount1={} price={} tvl={}",
                         metadata.pairAddress,
                         swapName,
                         metadata.getDisplayName(),
                         amount0Text,
                         amount1Text,
-                        priceText);
+                        priceText,
+                        tvlText);
             }
         }
     }
@@ -1259,6 +1262,87 @@ public class LiquidityMonitorService {
         return rangeOpt
                 .map(range -> String.format("[%s, %s]", formatDecimal(range.lower), formatDecimal(range.upper)))
                 .orElse("[]");
+    }
+
+    /**
+     * 计算并格式化 TVL 文本
+     */
+    private String formatTvl(Optional<TvlInfo> tvlOpt) {
+        return tvlOpt
+                .map(tvl -> {
+                    String amount = formatDecimal(tvl.amount);
+                    if (tvl.symbol == null || tvl.symbol.isEmpty()) {
+                        return amount;
+                    }
+                    return amount + " " + tvl.symbol;
+                })
+                .orElse("unknown");
+    }
+
+    /**
+     * 计算池子的 TVL
+     */
+    private Optional<TvlInfo> calculateTvl(DexPriceService.PairMetadata metadata, DexPriceService.PoolSnapshot snapshot) {
+        if (metadata == null || snapshot == null) {
+            return Optional.empty();
+        }
+        BigDecimal amount0 = snapshot.token0Amount;
+        BigDecimal amount1 = snapshot.token1Amount;
+        if (amount0 == null || amount1 == null) {
+            return Optional.empty();
+        }
+        BigDecimal ratio = snapshot.priceToken1PerToken0;
+        if (ratio == null || ratio.compareTo(BigDecimal.ZERO) <= 0) {
+            return Optional.empty();
+        }
+
+        BigDecimal tvlAmount;
+        String symbol;
+        if (metadata.token1.equalsIgnoreCase(DexConstants.USDT_ADDRESS)) {
+            symbol = resolveSymbol(metadata.token1Symbol, metadata.token1);
+            tvlAmount = amount1.add(amount0.multiply(ratio, PRICE_CONTEXT));
+        } else if (metadata.token0.equalsIgnoreCase(DexConstants.USDT_ADDRESS)) {
+            symbol = resolveSymbol(metadata.token0Symbol, metadata.token0);
+            tvlAmount = amount0.add(amount1.divide(ratio, 18, RoundingMode.HALF_UP));
+        } else if (metadata.token0.equalsIgnoreCase(tokenAddress)) {
+            symbol = resolveSymbol(metadata.token1Symbol, metadata.token1);
+            tvlAmount = amount1.add(amount0.multiply(ratio, PRICE_CONTEXT));
+        } else if (metadata.token1.equalsIgnoreCase(tokenAddress)) {
+            symbol = resolveSymbol(metadata.token0Symbol, metadata.token0);
+            Optional<BigDecimal> priceOpt = snapshot.priceForToken(tokenAddress, metadata);
+            if (!priceOpt.isPresent() || priceOpt.get().compareTo(BigDecimal.ZERO) <= 0) {
+                return Optional.empty();
+            }
+            tvlAmount = amount0.add(amount1.multiply(priceOpt.get(), PRICE_CONTEXT));
+        } else {
+            symbol = resolveSymbol(metadata.token1Symbol, metadata.token1);
+            tvlAmount = amount1.add(amount0.multiply(ratio, PRICE_CONTEXT));
+        }
+
+        return Optional.of(new TvlInfo(tvlAmount.setScale(18, RoundingMode.HALF_UP), symbol));
+    }
+
+    /**
+     * 解析符号
+     */
+    private String resolveSymbol(String symbol, String fallback) {
+        if (symbol != null && !symbol.isEmpty()) {
+            return symbol;
+        }
+        return fallback == null ? "" : fallback;
+    }
+
+    /**
+     * TVL 信息
+     */
+    private static class TvlInfo {
+        private final BigDecimal amount;
+        private final String symbol;
+
+        private TvlInfo(BigDecimal amount, String symbol) {
+            this.amount = amount;
+            this.symbol = symbol;
+        }
     }
 
     /**

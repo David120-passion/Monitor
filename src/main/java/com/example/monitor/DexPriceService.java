@@ -31,6 +31,8 @@ import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -59,12 +61,12 @@ public class DexPriceService {
     private final Map<String, BigInteger> decimalsCache = new ConcurrentHashMap<>();
     /** 代币符号缓存 */
     private final Map<String, String> symbolCache = new ConcurrentHashMap<>();
-    /** 按 token 组合缓存的 V2 配对信息 */
-    private final Map<String, List<PairMetadata>> pairCacheByTokens = new ConcurrentHashMap<>();
+    /** 按 token 组合缓存的 V2 配对信息（按池子地址去重） */
+    private final Map<String, Map<String, PairMetadata>> pairCacheByTokens = new ConcurrentHashMap<>();
     /** 按地址缓存的池子信息 */
     private final Map<String, PairMetadata> pairCacheByAddress = new ConcurrentHashMap<>();
-    /** 按 token 与费率缓存的 V3 池子信息 */
-    private final Map<String, PairMetadata> v3PoolCache = new ConcurrentHashMap<>();
+    /** 按 token、顺序与费率缓存的 V3 池子信息 */
+    private final Map<String, Map<String, PairMetadata>> v3PoolCache = new ConcurrentHashMap<>();
 
     /** 价格计算精度 */
     private static final MathContext PRICE_MATH_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
@@ -430,12 +432,12 @@ public class DexPriceService {
      */
     public List<PairMetadata> findOrCreatePairs(String tokenA, String tokenB) {
         String key = buildPairKey(tokenA, tokenB);
-        List<PairMetadata> cached = pairCacheByTokens.get(key);
+        Map<String, PairMetadata> cachedByAddress = pairCacheByTokens.get(key);
         List<PairMetadata> result = new ArrayList<>();
-        Set<String> seenAddresses = ConcurrentHashMap.newKeySet();
-        if (cached != null) {
-            result.addAll(cached);
-            cached.stream().map(meta -> normalize(meta.pairAddress)).forEach(seenAddresses::add);
+        Set<String> seenAddresses = new HashSet<>();
+        if (cachedByAddress != null) {
+            result.addAll(cachedByAddress.values());
+            seenAddresses.addAll(cachedByAddress.keySet());
         }
         for (String factory : DexConstants.V2_FACTORIES) {
             Optional<PairMetadata> metadata = queryPair(factory, tokenA, tokenB);
@@ -444,8 +446,8 @@ public class DexPriceService {
                 String normalizedAddress = normalize(pair.pairAddress);
                 if (seenAddresses.add(normalizedAddress)) {
                     result.add(pair);
-                    cachePairMetadata(pair, true);
                 }
+                cachePairMetadata(pair, true);
             }
         }
         return result;
@@ -462,20 +464,23 @@ public class DexPriceService {
         List<PairMetadata> pools = new ArrayList<>();
         for (BigInteger fee : DexConstants.V3_FEE_TIERS) {
             String key = buildV3PoolKey(tokenA, tokenB, fee);
-            PairMetadata cached = v3PoolCache.get(key);
-            if (cached != null) {
-                pools.add(cached);
-                continue;
+            Map<String, PairMetadata> cachedByAddress = v3PoolCache.get(key);
+            Set<String> seenAddresses = new HashSet<>();
+            if (cachedByAddress != null) {
+                pools.addAll(cachedByAddress.values());
+                seenAddresses.addAll(cachedByAddress.keySet());
             }
             for (String factory : DexConstants.V3_FACTORIES) {
                 Optional<PairMetadata> metadata = queryV3Pool(factory, tokenA, tokenB, fee);
-                if (metadata.isPresent()) {
-                    PairMetadata pairMetadata = metadata.get();
-                    v3PoolCache.put(key, pairMetadata);
-                    v3PoolCache.put(buildV3PoolKey(tokenB, tokenA, fee), pairMetadata);
-                    pools.add(pairMetadata);
-                    break;
+                if (!metadata.isPresent()) {
+                    continue;
                 }
+                PairMetadata pairMetadata = metadata.get();
+                String normalizedAddress = normalize(pairMetadata.pairAddress);
+                if (seenAddresses.add(normalizedAddress)) {
+                    pools.add(pairMetadata);
+                }
+                cachePairMetadata(pairMetadata, false);
             }
         }
         return pools;
@@ -629,6 +634,10 @@ public class DexPriceService {
             addPairToTokenCache(metadata.token0, metadata.token1, metadata);
             addPairToTokenCache(metadata.token1, metadata.token0, metadata);
         }
+        if (metadata.poolType == PoolType.V3 && metadata.fee != null) {
+            addV3PoolToCache(metadata.token0, metadata.token1, metadata.fee, metadata);
+            addV3PoolToCache(metadata.token1, metadata.token0, metadata.fee, metadata);
+        }
     }
 
     /**
@@ -640,20 +649,31 @@ public class DexPriceService {
      */
     private void addPairToTokenCache(String tokenA, String tokenB, PairMetadata metadata) {
         String key = buildPairKey(tokenA, tokenB);
-        pairCacheByTokens.compute(key, (k, list) -> {
-            List<PairMetadata> updated = list == null ? new ArrayList<>() : new ArrayList<>(list);
-            boolean replaced = false;
+        pairCacheByTokens.compute(key, (k, existing) -> {
+            Map<String, PairMetadata> updated = existing == null ? new LinkedHashMap<>() : new LinkedHashMap<>(existing);
             String normalizedAddress = normalize(metadata.pairAddress);
-            for (int i = 0; i < updated.size(); i++) {
-                if (normalize(updated.get(i).pairAddress).equals(normalizedAddress)) {
-                    updated.set(i, metadata);
-                    replaced = true;
-                    break;
-                }
-            }
-            if (!replaced) {
-                updated.add(metadata);
-            }
+            updated.put(normalizedAddress, metadata);
+            return updated;
+        });
+    }
+
+    /**
+     * 将 V3 池子加入缓存
+     *
+     * @param tokenA    代币 A
+     * @param tokenB    代币 B
+     * @param fee       费率
+     * @param metadata  池子信息
+     */
+    private void addV3PoolToCache(String tokenA, String tokenB, BigInteger fee, PairMetadata metadata) {
+        if (fee == null) {
+            return;
+        }
+        String key = buildV3PoolKey(tokenA, tokenB, fee);
+        v3PoolCache.compute(key, (k, existing) -> {
+            Map<String, PairMetadata> updated = existing == null ? new LinkedHashMap<>() : new LinkedHashMap<>(existing);
+            String normalizedAddress = normalize(metadata.pairAddress);
+            updated.put(normalizedAddress, metadata);
             return updated;
         });
     }
