@@ -6,13 +6,13 @@ import org.web3j.abi.EventEncoder;
 import org.web3j.abi.FunctionReturnDecoder;
 import org.web3j.abi.TypeReference;
 import org.web3j.abi.datatypes.Address;
-import org.web3j.abi.datatypes.DynamicBytes;
 import org.web3j.abi.datatypes.Event;
 import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Bytes32;
 import org.web3j.abi.datatypes.generated.Int24;
 import org.web3j.abi.datatypes.generated.Int256;
 import org.web3j.abi.datatypes.generated.Uint128;
+import org.web3j.abi.datatypes.generated.Uint160;
 import org.web3j.abi.datatypes.generated.Uint24;
 import org.web3j.abi.datatypes.generated.Uint256;
 import org.web3j.protocol.Web3j;
@@ -122,19 +122,19 @@ public class LiquidityMonitorService {
     private static final Event INITIALIZE_EVENT_V4 = new Event("Initialize",
             Arrays.asList(
                     TypeReference.create(Bytes32.class, true),
-                    TypeReference.create(Address.class),
-                    TypeReference.create(Address.class),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Address.class, true),
                     TypeReference.create(Address.class),
                     TypeReference.create(Uint24.class),
-                    TypeReference.create(DynamicBytes.class),
-                    TypeReference.create(Uint256.class),
+                    TypeReference.create(Bytes32.class),
+                    TypeReference.create(Uint160.class),
                     TypeReference.create(Int24.class)
             ));
     /** V4 ModifyLiquidity 事件 */
     private static final Event MODIFY_LIQUIDITY_EVENT_V4 = new Event("ModifyLiquidity",
             Arrays.asList(
                     TypeReference.create(Bytes32.class, true),
-                    TypeReference.create(Address.class),
+                    TypeReference.create(Address.class, true),
                     TypeReference.create(Int24.class),
                     TypeReference.create(Int24.class),
                     TypeReference.create(Int256.class),
@@ -301,21 +301,21 @@ public class LiquidityMonitorService {
     private void handleV4InitializeLog(String factoryAddress, Log logEntry) {
         try {
             List<String> topics = logEntry.getTopics();
-            if (topics.size() < 2) {
+            if (topics.size() < 4) {
                 return;
             }
             String poolIdTopic = topics.get(1);
             List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), INITIALIZE_EVENT_V4.getNonIndexedParameters());
-            if (data.size() < 7) {
+            if (data.size() < 5) {
                 return;
             }
-            String currency0 = normalizeAddress(((Address) data.get(0)).getValue().toString());
-            String currency1 = normalizeAddress(((Address) data.get(1)).getValue().toString());
-            String hooks = normalizeAddress(((Address) data.get(2)).getValue().toString());
-            BigInteger fee = ((Uint24) data.get(3)).getValue();
-            byte[] parameters = ((DynamicBytes) data.get(4)).getValue();
-            BigInteger sqrtPriceX96 = ((Uint256) data.get(5)).getValue();
-            int tick = ((Int24) data.get(6)).getValue().intValue();
+            String currency0 = normalizeAddress(decodeAddress(topics.get(2)));
+            String currency1 = normalizeAddress(decodeAddress(topics.get(3)));
+            String hooks = normalizeAddress(((Address) data.get(0)).getValue().toString());
+            BigInteger fee = ((Uint24) data.get(1)).getValue();
+            byte[] parameters = ((Bytes32) data.get(2)).getValue();
+            BigInteger sqrtPriceX96 = ((Uint160) data.get(3)).getValue();
+            int tick = ((Int24) data.get(4)).getValue().intValue();
             if (!matchesTarget(currency0, currency1)) {
                 return;
             }
@@ -373,7 +373,7 @@ public class LiquidityMonitorService {
     private void handleV4ModifyLiquidityLog(Log logEntry) {
         try {
             List<String> topics = logEntry.getTopics();
-            if (topics.size() < 2) {
+            if (topics.size() < 3) {
                 return;
             }
             String poolId = normalizePoolId(topics.get(1));
@@ -382,14 +382,14 @@ public class LiquidityMonitorService {
                 return;
             }
             List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), MODIFY_LIQUIDITY_EVENT_V4.getNonIndexedParameters());
-            if (data.size() < 5) {
+            if (data.size() < 4) {
                 return;
             }
-            String sender = normalizeAddress(((Address) data.get(0)).getValue().toString());
-            int tickLower = ((Int24) data.get(1)).getValue().intValue();
-            int tickUpper = ((Int24) data.get(2)).getValue().intValue();
-            BigInteger liquidityDelta = ((Int256) data.get(3)).getValue();
-            String salt = org.web3j.utils.Numeric.toHexString(((Bytes32) data.get(4)).getValue());
+            String sender = normalizeAddress(decodeAddress(topics.get(2)));
+            int tickLower = ((Int24) data.get(0)).getValue().intValue();
+            int tickUpper = ((Int24) data.get(1)).getValue().intValue();
+            BigInteger liquidityDelta = ((Int256) data.get(2)).getValue();
+            String salt = org.web3j.utils.Numeric.toHexString(((Bytes32) data.get(3)).getValue());
             int sign = liquidityDelta.signum();
             String action = sign > 0 ? "POOL_ADDED_V4" : (sign < 0 ? "POOL_REMOVED_V4" : "POOL_UPDATED_V4");
             log.info("{} manager={} poolId={} name={} sender={} currency0={} currency1={} fee={} hooks={} tickLower={} tickUpper={} liquidityDelta={} salt={} time={}",
