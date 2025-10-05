@@ -11,6 +11,7 @@ import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Bytes32;
 import org.web3j.abi.datatypes.generated.Int24;
 import org.web3j.abi.datatypes.generated.Int256;
+import org.web3j.abi.datatypes.generated.Uint112;
 import org.web3j.abi.datatypes.generated.Uint128;
 import org.web3j.abi.datatypes.generated.Uint160;
 import org.web3j.abi.datatypes.generated.Uint24;
@@ -61,6 +62,14 @@ public class LiquidityMonitorService {
     private final Set<String> burnSubscribedPools = ConcurrentHashMap.newKeySet();
     /** 已订阅 Mint 事件的池子集合 */
     private final Set<String> mintSubscribedPools = ConcurrentHashMap.newKeySet();
+    /** 已订阅 V2 Sync 事件的池子集合 */
+    private final Set<String> v2SyncSubscribedPools = ConcurrentHashMap.newKeySet();
+    /** 已订阅 V3 Initialize 事件的池子集合 */
+    private final Set<String> v3InitializeSubscribedPools = ConcurrentHashMap.newKeySet();
+    /** 已记录 V2 初始化价格的池子集合 */
+    private final Set<String> v2InitializedPools = ConcurrentHashMap.newKeySet();
+    /** 已记录 V3 初始化价格的池子集合 */
+    private final Set<String> v3InitializedPools = ConcurrentHashMap.newKeySet();
     /** 已知的 V4 池子元数据 */
     private final ConcurrentHashMap<String, V4PoolMetadata> v4Pools = new ConcurrentHashMap<>();
     /** V4 池子实时状态 */
@@ -105,6 +114,12 @@ public class LiquidityMonitorService {
                     TypeReference.create(Uint256.class),
                     TypeReference.create(Address.class, true)
             ));
+    /** V2 Sync 事件 */
+    private static final Event SYNC_EVENT_V2 = new Event("Sync",
+            Arrays.asList(
+                    TypeReference.create(Uint112.class),
+                    TypeReference.create(Uint112.class)
+            ));
     /** V3 Burn 事件 */
     private static final Event BURN_EVENT_V3 = new Event("Burn",
             Arrays.asList(
@@ -114,6 +129,12 @@ public class LiquidityMonitorService {
                     TypeReference.create(Uint128.class),
                     TypeReference.create(Uint256.class),
                     TypeReference.create(Uint256.class)
+            ));
+    /** V3 Initialize 事件 */
+    private static final Event INITIALIZE_EVENT_V3 = new Event("Initialize",
+            Arrays.asList(
+                    TypeReference.create(Uint160.class),
+                    TypeReference.create(Int24.class)
             ));
     /** V2 Mint 事件 */
     private static final Event MINT_EVENT_V2 = new Event("Mint",
@@ -379,6 +400,7 @@ public class LiquidityMonitorService {
                     hooks);
             V4PoolMetadata previous = v4Pools.putIfAbsent(normalizedPoolId, metadata);
             V4PoolMetadata effectiveMetadata = previous != null ? previous : metadata;
+            registerV4PoolForTransfers(effectiveMetadata);
             BigInteger currency0Decimals = priceService.resolveTokenDecimals(currency0);
             BigInteger currency1Decimals = priceService.resolveTokenDecimals(currency1);
             Optional<BigDecimal> rawPriceOpt = calculateToken1PerToken0Price(sqrtPriceX96, currency0Decimals, currency1Decimals);
@@ -566,6 +588,46 @@ public class LiquidityMonitorService {
     }
 
     /**
+     * 订阅 V2 Sync 事件以捕获初始价格
+     *
+     * @param metadata 池子元数据
+     */
+    private void subscribeV2InitialSync(DexPriceService.PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return;
+        }
+        String pairAddress = metadata.pairAddress;
+        String normalized = pairAddress.toLowerCase(Locale.ROOT);
+        if (!v2SyncSubscribedPools.add(normalized)) {
+            return;
+        }
+        EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, pairAddress);
+        filter.addSingleTopic(EventEncoder.encode(SYNC_EVENT_V2));
+        web3j.ethLogFlowable(filter).subscribe(logEntry -> handleV2SyncLog(metadata, logEntry), throwable ->
+                log.error("Error processing V2 sync event", throwable));
+    }
+
+    /**
+     * 订阅 V3 Initialize 事件以捕获初始价格
+     *
+     * @param metadata 池子元数据
+     */
+    private void subscribeV3Initialize(DexPriceService.PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return;
+        }
+        String poolAddress = metadata.pairAddress;
+        String normalized = poolAddress.toLowerCase(Locale.ROOT);
+        if (!v3InitializeSubscribedPools.add(normalized)) {
+            return;
+        }
+        EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, poolAddress);
+        filter.addSingleTopic(EventEncoder.encode(INITIALIZE_EVENT_V3));
+        web3j.ethLogFlowable(filter).subscribe(logEntry -> handleV3InitializeLog(metadata, logEntry), throwable ->
+                log.error("Error processing V3 initialize event", throwable));
+    }
+
+    /**
      * 处理 Burn 日志
      *
      * @param pairAddress 池子地址
@@ -631,6 +693,106 @@ public class LiquidityMonitorService {
             }
         } catch (Exception ex) {
             log.error("Failed to handle burn log", ex);
+        }
+    }
+
+    /**
+     * 处理 V2 Sync 日志
+     *
+     * @param metadata 池子信息
+     * @param logEntry 日志
+     */
+    private void handleV2SyncLog(DexPriceService.PairMetadata metadata, Log logEntry) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return;
+        }
+        String pairAddress = metadata.pairAddress;
+        String normalized = pairAddress.toLowerCase(Locale.ROOT);
+        if (v2InitializedPools.contains(normalized)) {
+            return;
+        }
+        try {
+            List<Type> data = decodeEventData(logEntry.getData(), SYNC_EVENT_V2);
+            if (data.size() < 2) {
+                return;
+            }
+            BigInteger reserve0Raw = ((Uint112) data.get(0)).getValue();
+            BigInteger reserve1Raw = ((Uint112) data.get(1)).getValue();
+            BigInteger decimals0 = resolveDecimals(metadata.token0Decimals, metadata.token0);
+            BigInteger decimals1 = resolveDecimals(metadata.token1Decimals, metadata.token1);
+            BigDecimal reserve0 = normalizeAmountHighPrecision(reserve0Raw, decimals0);
+            BigDecimal reserve1 = normalizeAmountHighPrecision(reserve1Raw, decimals1);
+            if (reserve0 == null || reserve1 == null) {
+                return;
+            }
+            BigDecimal priceToken1PerToken0 = reserve0.compareTo(BigDecimal.ZERO) > 0
+                    ? reserve1.divide(reserve0, 18, RoundingMode.HALF_UP)
+                    : null;
+            BigDecimal priceToken0PerToken1 = reserve1.compareTo(BigDecimal.ZERO) > 0
+                    ? reserve0.divide(reserve1, 18, RoundingMode.HALF_UP)
+                    : null;
+            String targetPriceText = resolveTargetPriceText(metadata.token0, metadata.token1,
+                    priceToken1PerToken0, priceToken0PerToken1);
+            String timestampText = formatTimestamp(resolveLogTimestamp(logEntry));
+            log.info("POOL_INITIALIZED_V2 pair={} name={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} reserve0={} reserve1={} time={}",
+                    pairAddress,
+                    metadata.getDisplayName(),
+                    priceToken1PerToken0 != null ? formatDecimal(priceToken1PerToken0) : "unknown",
+                    priceToken0PerToken1 != null ? formatDecimal(priceToken0PerToken1) : "unknown",
+                    targetPriceText,
+                    formatDecimal(reserve0),
+                    formatDecimal(reserve1),
+                    timestampText);
+            v2InitializedPools.add(normalized);
+        } catch (Exception ex) {
+            log.error("Failed to handle V2 sync log", ex);
+        }
+    }
+
+    /**
+     * 处理 V3 Initialize 日志
+     *
+     * @param metadata 池子信息
+     * @param logEntry 日志
+     */
+    private void handleV3InitializeLog(DexPriceService.PairMetadata metadata, Log logEntry) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return;
+        }
+        String poolAddress = metadata.pairAddress;
+        String normalized = poolAddress.toLowerCase(Locale.ROOT);
+        if (v3InitializedPools.contains(normalized)) {
+            return;
+        }
+        try {
+            List<Type> data = decodeEventData(logEntry.getData(), INITIALIZE_EVENT_V3);
+            if (data.size() < 1) {
+                return;
+            }
+            BigInteger sqrtPriceX96 = ((Uint160) data.get(0)).getValue();
+            BigInteger decimals0 = resolveDecimals(metadata.token0Decimals, metadata.token0);
+            BigInteger decimals1 = resolveDecimals(metadata.token1Decimals, metadata.token1);
+            Optional<BigDecimal> rawPriceOpt = calculateToken1PerToken0Price(sqrtPriceX96, decimals0, decimals1);
+            Optional<BigDecimal> trackedPriceOpt = calculateTargetPriceFromSqrt(sqrtPriceX96, decimals0, decimals1,
+                    metadata.token0, metadata.token1);
+            BigDecimal inversePrice = rawPriceOpt
+                    .filter(price -> price.compareTo(BigDecimal.ZERO) > 0)
+                    .map(price -> BigDecimal.ONE.divide(price, 18, RoundingMode.HALF_UP))
+                    .orElse(null);
+            String timestampText = formatTimestamp(resolveLogTimestamp(logEntry));
+            log.info("POOL_INITIALIZED_V3 pool={} name={} fee={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} sqrtPriceX96={} tick={} time={}",
+                    poolAddress,
+                    metadata.getDisplayName(),
+                    formatFee(metadata.fee),
+                    rawPriceOpt.map(this::formatDecimal).orElse("unknown"),
+                    inversePrice != null ? formatDecimal(inversePrice) : "unknown",
+                    trackedPriceOpt.map(this::formatDecimal).orElse("unknown"),
+                    sqrtPriceX96,
+                    data.size() > 1 ? ((Int24) data.get(1)).getValue() : "unknown",
+                    timestampText);
+            v3InitializedPools.add(normalized);
+        } catch (Exception ex) {
+            log.error("Failed to handle V3 initialize log", ex);
         }
     }
 
@@ -721,6 +883,11 @@ public class LiquidityMonitorService {
         String normalized = metadata.pairAddress.toLowerCase();
         if (registeredPools.add(normalized)) {
             transferMonitorService.addLiquidityPair(metadata.pairAddress);
+            if (metadata.poolType == DexPriceService.PoolType.V2) {
+                subscribeV2InitialSync(metadata);
+            } else if (metadata.poolType == DexPriceService.PoolType.V3) {
+                subscribeV3Initialize(metadata);
+            }
             Optional<DexPriceService.PoolSnapshot> snapshotOpt = priceService.loadPoolSnapshot(metadata);
             String amount0Text = snapshotOpt.map(snapshot -> snapshot.token0Amount)
                     .map(this::formatDecimal)
@@ -1448,6 +1615,22 @@ public class LiquidityMonitorService {
     }
 
     /**
+     * 解析目标代币价格文本
+     */
+    private String resolveTargetPriceText(String token0,
+                                          String token1,
+                                          BigDecimal priceToken1PerToken0,
+                                          BigDecimal priceToken0PerToken1) {
+        if (token0 != null && token0.equalsIgnoreCase(tokenAddress) && priceToken1PerToken0 != null) {
+            return formatDecimal(priceToken1PerToken0);
+        }
+        if (token1 != null && token1.equalsIgnoreCase(tokenAddress) && priceToken0PerToken1 != null) {
+            return formatDecimal(priceToken0PerToken1);
+        }
+        return "unknown";
+    }
+
+    /**
      * 安全格式化数量
      */
     private String formatAmount(BigDecimal amount) {
@@ -1530,6 +1713,62 @@ public class LiquidityMonitorService {
             return "0";
         }
         return normalized.toPlainString();
+    }
+
+    /**
+     * 为 V4 注册可识别的池子地址
+     */
+    private void registerV4PoolForTransfers(V4PoolMetadata metadata) {
+        if (metadata == null) {
+            return;
+        }
+        if (isNonZeroAddress(metadata.manager)) {
+            transferMonitorService.addLiquidityPair(metadata.manager);
+        }
+        if (isNonZeroAddress(metadata.hooks)) {
+            transferMonitorService.addLiquidityPair(metadata.hooks);
+        }
+    }
+
+    /**
+     * 高精度归一化数量
+     */
+    private BigDecimal normalizeAmountHighPrecision(BigInteger rawAmount, BigInteger decimals) {
+        if (rawAmount == null) {
+            return null;
+        }
+        int scale = decimals != null ? Math.max(decimals.intValue(), 0) : 18;
+        scale = Math.min(scale, 36);
+        BigDecimal divisor = BigDecimal.TEN.pow(scale);
+        if (divisor.compareTo(BigDecimal.ZERO) == 0) {
+            return null;
+        }
+        return new BigDecimal(rawAmount).divide(divisor, 18, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 解析代币精度
+     */
+    private BigInteger resolveDecimals(BigInteger cached, String token) {
+        if (cached != null) {
+            return cached;
+        }
+        if (token == null) {
+            return BigInteger.valueOf(18);
+        }
+        BigInteger resolved = priceService.resolveTokenDecimals(token);
+        return resolved != null ? resolved : BigInteger.valueOf(18);
+    }
+
+    /**
+     * 判断是否为非零地址
+     */
+    private boolean isNonZeroAddress(String address) {
+        if (address == null) {
+            return false;
+        }
+        String normalized = address.toLowerCase(Locale.ROOT);
+        return !"0x0000000000000000000000000000000000000000".equals(normalized);
     }
 
     /**

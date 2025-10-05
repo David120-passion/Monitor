@@ -1,0 +1,40 @@
+pair: Pool contract address / 池子合约地址
+pool: Pool contract address (V3/V4) / 池子合约地址（V3/V4）
+name: Pool display name / 池子显示名称
+token: Token address or symbol / 代币地址或符号
+decimals: Token decimals / 代币精度
+token0: Token0 address / Token0 地址
+token1: Token1 address / Token1 地址
+sender: Transaction sender address / 交易发送地址
+to: Recipient address / 接收地址
+from: Transfer sender address / 转出地址
+owner: Liquidity position owner / 流动性仓位所有者
+swap: Exchange name / 交易所名称
+fee: Pool fee tier (%) / 池子费率（%）
+tickSpacing: Tick spacing / Tick 间距
+burnedLiquidity: Burned liquidity amount / 被销毁的流动性数量
+amount: Transfer amount of monitored token / 监控代币的转账数量
+amount0: Token0 amount / Token0 数量
+amount1: Token1 amount / Token1 数量
+amount0Delta: Token0 change amount / Token0 变化数量
+amount1Delta: Token1 change amount / Token1 变化数量
+amount0Remaining: Remaining Token0 in pool / 池内剩余的 Token0 数量
+amount1Remaining: Remaining Token1 in pool / 池内剩余的 Token1 数量
+liquidity: Initial liquidity amount / 初始流动性数量
+price: Pool price (Token1 per Token0) / 池子价格（每个 Token0 的 Token1 数量）
+priceToken1PerToken0: Price of Token1 per Token0 / 每个 Token0 的 Token1 价格
+priceToken0PerToken1: Price of Token0 per Token1 / 每个 Token1 的 Token0 价格
+targetTokenPrice: Target token price / 目标代币价格
+priceRange: Active price range / 价格区间
+reserve0: Token0 reserve amount / Token0 储备数量
+reserve1: Token1 reserve amount / Token1 储备数量
+sqrtPriceX96: sqrtPriceX96 value / sqrtPriceX96 数值
+tick: Current tick / 当前 tick 值
+time: Event timestamp (Asia/Shanghai) / 事件时间（亚洲/上海）
+block: Block number / 区块高度
+volume24h: 24h trading volume in USD / 24 小时美元成交额
+netFlow: Net capital flow in USD / 净流入美元金额
+toBuyTotal: Accumulated buy total for address / 地址累计买入
+fromSellTotal: Accumulated sell total for address / 地址累计卖出
+tvl: Total value locked / 总锁仓价值
+tvlRemaining: Remaining TVL / 剩余锁仓价值
