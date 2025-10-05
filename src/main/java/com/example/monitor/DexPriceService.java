@@ -1162,7 +1162,7 @@ public class DexPriceService {
         }
 
         public String getSwapName() {
-            if (swapName != null && !swapName.isBlank()) {
+            if (swapName != null && !StringUtils.isEmpty(swapName)) {
                 return swapName;
             }
             return factoryAddress != null ? factoryAddress : "unknown";

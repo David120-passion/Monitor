@@ -347,8 +347,6 @@ public class LiquidityMonitorService {
             V4PoolMetadata previous = v4Pools.putIfAbsent(normalizedPoolId, metadata);
             if (previous == null) {
                 Instant timestamp = resolveLogTimestamp(logEntry);
-                String currency0Display = formatCurrencyDisplay(metadata.currency0Symbol, currency0);
-                String currency1Display = formatCurrencyDisplay(metadata.currency1Symbol, currency1);
                 BigInteger currency0Decimals = priceService.resolveTokenDecimals(currency0);
                 BigInteger currency1Decimals = priceService.resolveTokenDecimals(currency1);
                 Optional<BigDecimal> rawPriceOpt = calculateToken1PerToken0Price(sqrtPriceX96, currency0Decimals, currency1Decimals);
@@ -360,14 +358,11 @@ public class LiquidityMonitorService {
                         .map(this::formatDecimal)
                         .orElse("unknown");
                 String trackedPriceText = trackedPriceOpt.map(this::formatDecimal).orElse("unknown");
-                log.info("POOL_INITIALIZED_V4 manager={} poolId={} name={} currency0={} currency1={} fee={} hooks={} parameters={} sqrtPriceX96={} tick={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} time={}",
+                log.info("POOL_INITIALIZED_V4 manager={} poolId={} name={}  fee={}  parameters={} sqrtPriceX96={} tick={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} time={}",
                         factoryAddress,
                         normalizedPoolId,
                         metadata.getDisplayName(),
-                        currency0Display,
-                        currency1Display,
                         formatFee(fee),
-                        hooks,
                         org.web3j.utils.Numeric.toHexString(parameters),
                         sqrtPriceX96,
                         tick,
@@ -439,8 +434,6 @@ public class LiquidityMonitorService {
             int sign = liquidityDelta.signum();
             String action = sign > 0 ? "POOL_ADDED_V4" : (sign < 0 ? "POOL_REMOVED_V4" : "POOL_UPDATED_V4");
             Instant timestamp = resolveLogTimestamp(logEntry);
-            String currency0Display = formatCurrencyDisplay(metadata.currency0Symbol, metadata.currency0);
-            String currency1Display = formatCurrencyDisplay(metadata.currency1Symbol, metadata.currency1);
             BigInteger decimals0 = priceService.resolveTokenDecimals(metadata.currency0);
             BigInteger decimals1 = priceService.resolveTokenDecimals(metadata.currency1);
             Optional<DexPriceService.PriceRange> priceRangeOpt = calculateV4PriceRange(metadata, decimals0, decimals1, tickLower, tickUpper);
@@ -455,16 +448,13 @@ public class LiquidityMonitorService {
                             .divide(BigDecimal.valueOf(2), 18, RoundingMode.HALF_UP))
                     .map(this::formatDecimal)
                     .orElse("unknown");
-            log.info("{} manager={} poolId={} name={} sender={} currency0={} currency1={} fee={} hooks={} tickLower={} tickUpper={} liquidityDelta={} amount0Delta={} amount1Delta={} priceRange={} avgPrice={} salt={} time={}",
+            log.info("{} manager={} poolId={} name={} sender={}  fee={}  tickLower={} tickUpper={} liquidityDelta={} amount0Delta={} amount1Delta={} priceRange={} avgPrice={} salt={} time={}",
                     action,
                     metadata.manager,
                     metadata.poolId,
                     metadata.getDisplayName(),
                     sender,
-                    currency0Display,
-                    currency1Display,
                     formatFee(metadata.fee),
-                    metadata.hooks,
                     tickLower,
                     tickUpper,
                     liquidityDelta,
@@ -953,15 +943,19 @@ public class LiquidityMonitorService {
     private String formatCurrencyDisplay(String symbol, String address) {
         String normalized = normalizeAddress(address);
         if (normalized == null) {
-            return (symbol != null && !symbol.isBlank()) ? symbol : "unknown";
+            return (symbol != null && !isBlank(symbol)) ? symbol : "unknown";
         }
         if (isZeroAddress(normalized)) {
             return "BNB(" + normalized + ")";
         }
-        if (symbol != null && !symbol.isBlank()) {
+        if (symbol != null && !isBlank(symbol)) {
             return symbol + "(" + normalized + ")";
         }
         return normalized;
+    }
+
+    private boolean isBlank(String str){
+        return str == null || str.trim().isEmpty();
     }
 
     /**
