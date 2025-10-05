@@ -1,0 +1,149 @@
+# log.info 英文字段说明
+
+以下列表按照日志类型汇总了 `log.info` 输出中出现的英文字段含义，便于对接告警或 BI 分析。字段按实际输出顺序排列，若某些字段在特定场景不存在，则会在说明中注明。
+
+## LiquidityMonitorService.java
+
+### PAIR_CREATED
+- `pair`：新建 V2 池子的合约地址。
+- `name`：格式化后的池子名称（`token0-token1`，均为小写）。仅当成功解析到代币符号时输出。
+- `token0`：池子中 token0 的合约地址。
+- `token1`：池子中 token1 的合约地址。
+- `liquidity`：工厂 `PairCreated` 事件中的最后一个整数参数，对应当前工厂累计创建的池子数量。
+- `time`：事件发生时间（UTC，源自区块时间戳）。
+
+### POOL_CREATED
+- `pool`：新建 V3/V4 池子的合约地址。
+- `name`：格式化后的池子名称（`token0-token1`，均为小写）。仅当成功解析到代币符号时输出。
+- `fee`：池子手续费，已经转换为百分比文本（如 `0.3%`）。
+- `tickSpacing`：池子的最小 tick 间隔。
+- `token0`：池子中 token0 的合约地址（仅在无法解析名称时输出的备用日志中出现）。
+- `token1`：池子中 token1 的合约地址（仅在无法解析名称时输出的备用日志中出现）。
+- `time`：事件发生时间（UTC）。
+
+### POOL_INITIALIZED_V4
+- `manager`：V4 池子所属的工厂（PoolManager）地址。
+- `poolId`：V4 池子的唯一标识（哈希值）。
+- `name`：格式化后的池子名称（`token0-token1`，小写）。
+- `fee`：池子手续费，已经转换为百分比文本。
+- `parameters`：初始化时传入的原始 32 字节参数（十六进制字符串）。
+- `sqrtPriceX96`：初始化时的 `sqrtPriceX96` 数值。
+- `tick`：初始化后的当前 tick。
+- `priceToken1PerToken0`：按照初始化价格估算的 `token1/token0` 价格。
+- `priceToken0PerToken1`：`token0/token1` 的倒数价格。
+- `targetTokenPrice`：当监控目标代币位于池子中时，目标代币相对于另一代币的价格；否则为 `unknown`。
+- `time`：事件发生时间（UTC）。
+
+### POOL_ADDED_V4 / POOL_REMOVED_V4 / POOL_UPDATED_V4
+- `action`：日志首个占位符，对应本次流动性变更的类型（`POOL_ADDED_V4`、`POOL_REMOVED_V4` 或 `POOL_UPDATED_V4`）。
+- `manager`：V4 池子所属的工厂（PoolManager）地址。
+- `poolId`：流动性变更对应的 V4 池子标识。
+- `name`：格式化后的池子名称（`token0-token1`，小写）。
+- `sender`：提交流动性变更交易的钱包地址。
+- `fee`：池子手续费，百分比文本。
+- `tickLower`：本次头寸下界 tick。
+- `tickUpper`：本次头寸上界 tick。
+- `liquidityDelta`：本次头寸变化的原始流动性数量（带符号）。
+- `amount0Delta`：估算的 token0 数量变化（已按精度换算后的文本）。
+- `amount1Delta`：估算的 token1 数量变化。
+- `priceRange`：根据 tick 估算的价格区间（`lower~upper` 文本）。
+- `avgPrice`：上述价格区间的平均价格。
+- `salt`：头寸的唯一盐值（ModifyLiquidity 事件中的 Bytes32）。
+- `time`：事件发生时间（UTC）。
+
+### POOL_REMOVED
+- `pair`：发生 Burn 事件的 V2 池子地址。
+- `name`：格式化后的池子名称（`token0-token1`，小写）。
+- `sender`：发起 Burn 交易的钱包地址。
+- `to`：接收撤出流动性的目标地址。
+- `token0`：token0 的合约地址。
+- `token1`：token1 的合约地址。
+- `amount0`：撤出的 token0 数量（已按精度换算）。
+- `amount1`：撤出的 token1 数量（已按精度换算）。
+- `time`：事件发生时间（UTC）。
+
+### POOL_REMOVED_V3
+- `pool`：发生 Burn 事件的 V3 池子地址。
+- `name`：格式化后的池子名称（`token0-token1`，小写）。
+- `owner`：头寸所属地址。
+- `fee`：池子手续费，百分比文本。
+- `priceRange`：根据头寸 tick 估算的价格区间。
+- `token0`：token0 的合约地址。
+- `token1`：token1 的合约地址。
+- `tickLower`：头寸下界 tick。
+- `tickUpper`：头寸上界 tick。
+- `burnedLiquidity`：本次移除的原始流动性数量。
+- `amount0`：估算的 token0 数量（已按精度换算）。
+- `amount1`：估算的 token1 数量（已按精度换算）。
+- `time`：事件发生时间（UTC）。
+
+### POOL_ADDED
+- `pair`：发生 Mint 事件的 V2 池子地址。
+- `name`：格式化后的池子名称（`token0-token1`，小写）。
+- `sender`：发起 Mint 交易的钱包地址。
+- `token0`：token0 的合约地址。
+- `token1`：token1 的合约地址。
+- `amount0`：新增的 token0 数量（已按精度换算）。
+- `amount1`：新增的 token1 数量（已按精度换算）。
+- `time`：事件发生时间（UTC）。
+
+### POOL_ADDED_V3
+- `pool`：发生 Mint 事件的 V3 池子地址。
+- `name`：格式化后的池子名称（`token0-token1`，小写）。
+- `sender`：发起 Mint 交易的钱包地址。
+- `owner`：头寸所属地址。
+- `fee`：池子手续费，百分比文本。
+- `priceRange`：根据头寸 tick 估算的价格区间。
+- `token0`：token0 的合约地址。
+- `token1`：token1 的合约地址。
+- `tickLower`：头寸下界 tick。
+- `tickUpper`：头寸上界 tick。
+- `liquidity`：本次新增的原始流动性数量。
+- `amount0`：新增的 token0 数量（已按精度换算）。
+- `amount1`：新增的 token1 数量（已按精度换算）。
+- `time`：事件发生时间（UTC）。
+
+### POOL_REGISTERED（V3 池子快照）
+- `pair`：被注册的池子地址。
+- `swap`：池子所属的交易所名称（例如 `PancakeSwap V3`）。
+- `name`：格式化后的池子名称（`token0-token1`，小写）。
+- `fee`：池子手续费，百分比文本。
+- `amount0`：当前池子持有的 token0 数量（标准精度）。
+- `amount1`：当前池子持有的 token1 数量（标准精度）。
+- `price`：目标代币在该池子中的价格（若无法计算则为 `unknown`）。
+- `priceRange`：根据当前 tick 和 tickSpacing 推算的价格区间。
+- `tick`：当前 tick（若无法获取则为 `unknown`）。
+- `tickSpacing`：当前 tickSpacing（若无法获取则为 `unknown`）。
+
+### POOL_REGISTERED（V2 池子快照）
+- `pair`：被注册的池子地址。
+- `swap`：池子所属的交易所名称。
+- `name`：格式化后的池子名称（`token0-token1`，小写）。
+- `amount0`：当前池子持有的 token0 数量（标准精度）。
+- `amount1`：当前池子持有的 token1 数量（标准精度）。
+- `price`：目标代币在该池子中的价格（若无法计算则为 `unknown`）。
+
+## BscTokenMonitor.java
+
+### Detected token creation block
+- `block`：检测到的代币创建区块高度。
+- `token`：代币合约地址。
+
+### Starting monitor
+- `token`：监控目标代币的符号（若无法获取则为默认值）。
+- `decimals`：代币的精度。
+
+## TransferMonitorService.java
+
+### TRANSFER
+- `from`：代币转出的地址。
+- `to`：代币转入的地址。
+- `amount`：本次转账的代币数量（已按精度换算）。
+- `tokenSymbol`：代币符号。
+- `price`：转账发生区块的估算美元价格。
+- `block`：转账所属的区块高度。
+- `time`：转账时间（UTC）。
+- `toBuyTotal`：接收地址在最近 24 小时内从池子买入的代币累计数量。
+- `fromSellTotal`：转出地址在最近 24 小时内向池子卖出的代币累计数量。
+- `volume24h`：最近 24 小时内估算的美元成交额。
+- `netFlow`：最近 24 小时内的美元净流入（买入金额 - 卖出金额）。

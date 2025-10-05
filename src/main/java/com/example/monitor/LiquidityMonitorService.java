@@ -472,9 +472,8 @@ public class LiquidityMonitorService {
     /**
      * 订阅 Burn 事件以检测撤池
      *
-     * @param pairAddress 池子地址
-     * @param token0      token0 地址
-     * @param token1      token1 地址
+     * @param metadata 池子元数据
+     * @param event    事件定义
      */
     private void subscribeBurn(DexPriceService.PairMetadata metadata, Event event) {
         if (metadata == null || metadata.pairAddress == null || event == null) {
@@ -497,10 +496,8 @@ public class LiquidityMonitorService {
     /**
      * 订阅 Mint 事件以检测加池
      *
-     * @param pairAddress 池子地址
-     * @param token0      token0 地址
-     * @param token1      token1 地址
-     * @param event       事件定义
+     * @param metadata 池子元数据
+     * @param event    事件定义
      */
     private void subscribeMint(DexPriceService.PairMetadata metadata, Event event) {
         if (metadata == null || metadata.pairAddress == null || event == null) {
@@ -659,9 +656,7 @@ public class LiquidityMonitorService {
     /**
      * 注册池子
      *
-     * @param pairAddress 池子地址
-     * @param token0      token0 地址
-     * @param token1      token1 地址
+     * @param metadata 池子元数据
      */
     private void registerPool(DexPriceService.PairMetadata metadata) {
         if (metadata == null || metadata.pairAddress == null) {

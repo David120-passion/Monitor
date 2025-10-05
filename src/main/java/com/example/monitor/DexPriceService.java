@@ -705,7 +705,14 @@ public class DexPriceService {
      * @return 代币符号
      */
     private String fetchSymbol(String token) {
+        if (token == null) {
+            return null;
+        }
         String normalized = normalize(token);
+        if (isZeroAddress(normalized)) {
+            symbolCache.putIfAbsent(normalized, "BNB");
+            return "BNB";
+        }
         return symbolCache.computeIfAbsent(normalized, key ->
                 tokenInfoService.loadSymbol(token).orElse(normalized));
     }
