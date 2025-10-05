@@ -3,13 +3,11 @@ package com.example.monitor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.web3j.abi.EventEncoder;
-import org.web3j.abi.FunctionEncoder;
 import org.web3j.abi.FunctionReturnDecoder;
 import org.web3j.abi.TypeReference;
 import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.DynamicBytes;
 import org.web3j.abi.datatypes.Event;
-import org.web3j.abi.datatypes.StaticStruct;
 import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Bytes32;
 import org.web3j.abi.datatypes.generated.Int24;
@@ -17,7 +15,6 @@ import org.web3j.abi.datatypes.generated.Int256;
 import org.web3j.abi.datatypes.generated.Uint128;
 import org.web3j.abi.datatypes.generated.Uint24;
 import org.web3j.abi.datatypes.generated.Uint256;
-import org.web3j.crypto.Hash;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.DefaultBlockParameterName;
@@ -127,9 +124,11 @@ public class LiquidityMonitorService {
                     TypeReference.create(Bytes32.class, true),
                     TypeReference.create(Address.class),
                     TypeReference.create(Address.class),
+                    TypeReference.create(Address.class),
                     TypeReference.create(Uint24.class),
-                    TypeReference.create(Int24.class),
-                    TypeReference.create(Address.class)
+                    TypeReference.create(DynamicBytes.class),
+                    TypeReference.create(Uint256.class),
+                    TypeReference.create(Int24.class)
             ));
     /** V4 ModifyLiquidity 事件 */
     private static final Event MODIFY_LIQUIDITY_EVENT_V4 = new Event("ModifyLiquidity",
@@ -139,11 +138,7 @@ public class LiquidityMonitorService {
                     TypeReference.create(Int24.class),
                     TypeReference.create(Int24.class),
                     TypeReference.create(Int256.class),
-                    new TypeReference<BalanceDelta>() {
-                    },
-                    new TypeReference<BalanceDelta>() {
-                    },
-                    TypeReference.create(DynamicBytes.class)
+                    TypeReference.create(Bytes32.class)
             ));
 
     /**
@@ -311,42 +306,39 @@ public class LiquidityMonitorService {
             }
             String poolIdTopic = topics.get(1);
             List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), INITIALIZE_EVENT_V4.getNonIndexedParameters());
-            if (data.size() < 5) {
+            if (data.size() < 7) {
                 return;
             }
             String currency0 = normalizeAddress(((Address) data.get(0)).getValue().toString());
             String currency1 = normalizeAddress(((Address) data.get(1)).getValue().toString());
-            BigInteger fee = ((Uint24) data.get(2)).getValue();
-            BigInteger tickSpacing = ((Int24) data.get(3)).getValue();
-            String hooks = normalizeAddress(((Address) data.get(4)).getValue().toString());
+            String hooks = normalizeAddress(((Address) data.get(2)).getValue().toString());
+            BigInteger fee = ((Uint24) data.get(3)).getValue();
+            byte[] parameters = ((DynamicBytes) data.get(4)).getValue();
+            BigInteger sqrtPriceX96 = ((Uint256) data.get(5)).getValue();
+            int tick = ((Int24) data.get(6)).getValue().intValue();
             if (!matchesTarget(currency0, currency1)) {
                 return;
             }
-            String computedPoolId = computeV4PoolId(currency0, currency1, fee, tickSpacing, hooks);
             String normalizedPoolId = normalizePoolId(poolIdTopic);
-            if (computedPoolId != null && !computedPoolId.equals(normalizedPoolId)) {
-                log.warn("V4 pool id mismatch manager={} topicId={} computedId={} currency0={} currency1={} fee={} tickSpacing={} hooks={}",
-                        factoryAddress,
-                        normalizedPoolId,
-                        computedPoolId,
-                        currency0,
-                        currency1,
-                        fee,
-                        tickSpacing,
-                        hooks);
-            }
-            V4PoolMetadata metadata = buildV4Metadata(factoryAddress, normalizedPoolId, currency0, currency1, fee, tickSpacing, hooks);
+            V4PoolMetadata metadata = buildV4Metadata(factoryAddress,
+                    normalizedPoolId,
+                    currency0,
+                    currency1,
+                    fee,
+                    hooks);
             V4PoolMetadata previous = v4Pools.putIfAbsent(normalizedPoolId, metadata);
             if (previous == null) {
-                log.info("POOL_INITIALIZED_V4 manager={} poolId={} name={} currency0={} currency1={} fee={} tickSpacing={} hooks={} time={}",
+                log.info("POOL_INITIALIZED_V4 manager={} poolId={} name={} currency0={} currency1={} fee={} hooks={} parameters={} sqrtPriceX96={} tick={} time={}",
                         factoryAddress,
                         normalizedPoolId,
                         metadata.getDisplayName(),
                         currency0,
                         currency1,
                         formatFee(fee),
-                        tickSpacing,
                         hooks,
+                        org.web3j.utils.Numeric.toHexString(parameters),
+                        sqrtPriceX96,
+                        tick,
                         Instant.now());
             }
             subscribeV4ModifyLiquidity(factoryAddress, poolIdTopic);
@@ -390,22 +382,17 @@ public class LiquidityMonitorService {
                 return;
             }
             List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), MODIFY_LIQUIDITY_EVENT_V4.getNonIndexedParameters());
-            if (data.size() < 7) {
+            if (data.size() < 5) {
                 return;
             }
-            String sender = normalizeAddress(data.get(0).getValue().toString());
+            String sender = normalizeAddress(((Address) data.get(0)).getValue().toString());
             int tickLower = ((Int24) data.get(1)).getValue().intValue();
             int tickUpper = ((Int24) data.get(2)).getValue().intValue();
             BigInteger liquidityDelta = ((Int256) data.get(3)).getValue();
-            BalanceDelta callerDelta = (BalanceDelta) data.get(4);
-            BalanceDelta feesAccrued = (BalanceDelta) data.get(5);
-            BigDecimal amount0 = normalizeV4Amount(callerDelta.amount0.getValue(), metadata.currency0Decimals);
-            BigDecimal amount1 = normalizeV4Amount(callerDelta.amount1.getValue(), metadata.currency1Decimals);
-            BigDecimal fees0 = normalizeV4Amount(feesAccrued.amount0.getValue(), metadata.currency0Decimals);
-            BigDecimal fees1 = normalizeV4Amount(feesAccrued.amount1.getValue(), metadata.currency1Decimals);
+            String salt = org.web3j.utils.Numeric.toHexString(((Bytes32) data.get(4)).getValue());
             int sign = liquidityDelta.signum();
             String action = sign > 0 ? "POOL_ADDED_V4" : (sign < 0 ? "POOL_REMOVED_V4" : "POOL_UPDATED_V4");
-            log.info("{} manager={} poolId={} name={} sender={} currency0={} currency1={} tickLower={} tickUpper={} liquidityDelta={} amount0={} amount1={} fees0={} fees1={} time={}",
+            log.info("{} manager={} poolId={} name={} sender={} currency0={} currency1={} fee={} hooks={} tickLower={} tickUpper={} liquidityDelta={} salt={} time={}",
                     action,
                     metadata.manager,
                     metadata.poolId,
@@ -413,13 +400,12 @@ public class LiquidityMonitorService {
                     sender,
                     metadata.currency0,
                     metadata.currency1,
+                    formatFee(metadata.fee),
+                    metadata.hooks,
                     tickLower,
                     tickUpper,
                     liquidityDelta,
-                    amount0,
-                    amount1,
-                    fees0,
-                    fees1,
+                    salt,
                     Instant.now());
         } catch (Exception ex) {
             log.error("Failed to handle V4 modify liquidity log", ex);
@@ -660,10 +646,7 @@ public class LiquidityMonitorService {
                                            String currency0,
                                            String currency1,
                                            BigInteger fee,
-                                           BigInteger tickSpacing,
                                            String hooks) {
-        BigInteger token0Decimals = priceService.resolveTokenDecimals(currency0);
-        BigInteger token1Decimals = priceService.resolveTokenDecimals(currency1);
         String symbol0 = priceService.resolveTokenSymbol(currency0);
         String symbol1 = priceService.resolveTokenSymbol(currency1);
         return new V4PoolMetadata(normalizeAddress(manager),
@@ -671,38 +654,9 @@ public class LiquidityMonitorService {
                 currency0,
                 currency1,
                 fee,
-                tickSpacing,
                 hooks,
-                token0Decimals,
-                token1Decimals,
                 symbol0,
                 symbol1);
-    }
-
-    private String computeV4PoolId(String currency0,
-                                   String currency1,
-                                   BigInteger fee,
-                                   BigInteger tickSpacing,
-                                   String hooks) {
-        try {
-            String encoded = FunctionEncoder.encodeConstructor(Arrays.asList(
-                    new Address(currency0),
-                    new Address(currency1),
-                    new Uint24(fee),
-                    new Int24(tickSpacing),
-                    new Address(hooks)
-            ));
-            return normalizePoolId(Hash.sha3(encoded));
-        } catch (Exception ex) {
-            log.warn("Failed to compute V4 pool id currency0={} currency1={} fee={} tickSpacing={} hooks={}",
-                    currency0,
-                    currency1,
-                    fee,
-                    tickSpacing,
-                    hooks,
-                    ex);
-            return null;
-        }
     }
 
     private String normalizePoolId(String poolId) {
@@ -826,23 +780,13 @@ public class LiquidityMonitorService {
         return latestBlock;
     }
 
-    private BigDecimal normalizeV4Amount(BigInteger rawAmount, BigInteger decimals) {
-        if (decimals == null) {
-            return new BigDecimal(rawAmount);
-        }
-        return new BigDecimal(rawAmount).divide(BigDecimal.TEN.pow(decimals.intValue()), 8, RoundingMode.HALF_UP);
-    }
-
     private static class V4PoolMetadata {
         private final String manager;
         private final String poolId;
         private final String currency0;
         private final String currency1;
         private final BigInteger fee;
-        private final BigInteger tickSpacing;
         private final String hooks;
-        private final BigInteger currency0Decimals;
-        private final BigInteger currency1Decimals;
         private final String currency0Symbol;
         private final String currency1Symbol;
 
@@ -851,10 +795,7 @@ public class LiquidityMonitorService {
                                String currency0,
                                String currency1,
                                BigInteger fee,
-                               BigInteger tickSpacing,
                                String hooks,
-                               BigInteger currency0Decimals,
-                               BigInteger currency1Decimals,
                                String currency0Symbol,
                                String currency1Symbol) {
             this.manager = manager;
@@ -862,10 +803,7 @@ public class LiquidityMonitorService {
             this.currency0 = currency0;
             this.currency1 = currency1;
             this.fee = fee;
-            this.tickSpacing = tickSpacing;
             this.hooks = hooks;
-            this.currency0Decimals = currency0Decimals;
-            this.currency1Decimals = currency1Decimals;
             this.currency0Symbol = currency0Symbol;
             this.currency1Symbol = currency1Symbol;
         }
@@ -874,21 +812,6 @@ public class LiquidityMonitorService {
             String symbol0 = currency0Symbol != null ? currency0Symbol : currency0;
             String symbol1 = currency1Symbol != null ? currency1Symbol : currency1;
             return symbol0.toLowerCase(Locale.ROOT) + "-" + symbol1.toLowerCase(Locale.ROOT);
-        }
-    }
-
-    public static class BalanceDelta extends StaticStruct {
-        public final Int256 amount0;
-        public final Int256 amount1;
-
-        public BalanceDelta(Int256 amount0, Int256 amount1) {
-            super(amount0, amount1);
-            this.amount0 = amount0;
-            this.amount1 = amount1;
-        }
-
-        public BalanceDelta(List<Type> values) {
-            this((Int256) values.get(0), (Int256) values.get(1));
         }
     }
 
