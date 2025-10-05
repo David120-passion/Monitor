@@ -137,13 +137,13 @@ public class LiquidityMonitorService {
     private static final Event INITIALIZE_EVENT_V4 = new Event("Initialize",
             Arrays.asList(
                     TypeReference.create(Bytes32.class, true),
-                    TypeReference.create(Address.class, true),
-                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Address.class),
                     TypeReference.create(Address.class),
                     TypeReference.create(Uint24.class),
-                    TypeReference.create(Bytes32.class),
+                    TypeReference.create(Int24.class),
                     TypeReference.create(Uint160.class),
-                    TypeReference.create(Int24.class)
+                    TypeReference.create(Uint24.class),
+                    TypeReference.create(Address.class)
             ));
     /** V4 ModifyLiquidity 事件 */
     private static final Event MODIFY_LIQUIDITY_EVENT_V4 = new Event("ModifyLiquidity",
@@ -354,19 +354,19 @@ public class LiquidityMonitorService {
     private void handleV4InitializeLog(String factoryAddress, Log logEntry) {
         try {
             List<String> topics = logEntry.getTopics();
-            if (topics.size() < 4) {
+            if (topics.size() < 2) {
                 return;
             }
             String poolIdTopic = topics.get(1);
             List<Type> data = decodeEventData(logEntry.getData(), INITIALIZE_EVENT_V4);
-            if (data.size() < 5) {
+            if (data.size() < 7) {
                 return;
             }
-            String currency0 = normalizeAddress(decodeAddress(topics.get(2)));
-            String currency1 = normalizeAddress(decodeAddress(topics.get(3)));
-            String hooks = normalizeAddress(((Address) data.get(0)).getValue().toString());
-            BigInteger fee = ((Uint24) data.get(1)).getValue();
-            BigInteger sqrtPriceX96 = ((Uint160) data.get(3)).getValue();
+            String currency0 = normalizeAddress(((Address) data.get(0)).getValue());
+            String currency1 = normalizeAddress(((Address) data.get(1)).getValue());
+            BigInteger fee = ((Uint24) data.get(2)).getValue();
+            BigInteger sqrtPriceX96 = ((Uint160) data.get(4)).getValue();
+            String hooks = normalizeAddress(((Address) data.get(6)).getValue());
             if (!matchesTarget(currency0, currency1)) {
                 return;
             }
