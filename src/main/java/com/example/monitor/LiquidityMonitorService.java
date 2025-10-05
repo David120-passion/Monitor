@@ -358,14 +358,9 @@ public class LiquidityMonitorService {
                         .map(this::formatDecimal)
                         .orElse("unknown");
                 String trackedPriceText = trackedPriceOpt.map(this::formatDecimal).orElse("unknown");
-                log.info("POOL_INITIALIZED_V4 manager={} poolId={} name={}  fee={}  parameters={} sqrtPriceX96={} tick={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} time={}",
-                        factoryAddress,
-                        normalizedPoolId,
+                log.info("POOL_INITIALIZED_V4 name={}  fee={}   priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} time={}",
                         metadata.getDisplayName(),
                         formatFee(fee),
-                        org.web3j.utils.Numeric.toHexString(parameters),
-                        sqrtPriceX96,
-                        tick,
                         rawPriceText,
                         inversePriceText,
                         trackedPriceText,
@@ -448,21 +443,17 @@ public class LiquidityMonitorService {
                             .divide(BigDecimal.valueOf(2), 18, RoundingMode.HALF_UP))
                     .map(this::formatDecimal)
                     .orElse("unknown");
-            log.info("{} manager={} poolId={} name={} sender={}  fee={}  tickLower={} tickUpper={} liquidityDelta={} amount0Delta={} amount1Delta={} priceRange={} avgPrice={} salt={} time={}",
+            log.info("{} name={} sender={}  fee={}  tickLower={} tickUpper={}  amount0Delta={} amount1Delta={} priceRange={} avgPrice={}  time={}",
                     action,
-                    metadata.manager,
-                    metadata.poolId,
                     metadata.getDisplayName(),
                     sender,
                     formatFee(metadata.fee),
                     tickLower,
                     tickUpper,
-                    liquidityDelta,
                     amount0Text,
                     amount1Text,
                     priceRangeText,
                     averagePriceText,
-                    salt,
                     timestamp);
         } catch (Exception ex) {
             log.error("Failed to handle V4 modify liquidity log", ex);
