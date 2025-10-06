@@ -152,31 +152,42 @@ public class DexPriceService {
      * @return 价格
      */
     private Optional<BigDecimal> getBestPriceForPair(String baseToken, String quoteToken, BigInteger blockNumber) {
-        List<PairMetadata> v2Pairs = findOrCreatePairs(baseToken, quoteToken);
-        Optional<BigDecimal> v2Price = getBestPriceFromPairs(v2Pairs, baseToken, blockNumber);
-        if (v2Price.isPresent()) {
-            return v2Price;
+        List<BigDecimal> prices = new ArrayList<>();
+
+        prices.addAll(collectPricesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken, blockNumber));
+        prices.addAll(collectPricesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken, blockNumber));
+        prices.addAll(collectPricesFromPairs(findOrCreateV4Pools(baseToken, quoteToken), baseToken, blockNumber));
+
+        if (prices.isEmpty()) {
+            return Optional.empty();
         }
-        List<PairMetadata> v3Pools = findOrCreateV3Pools(baseToken, quoteToken);
-        return getBestPriceFromPairs(v3Pools, baseToken, blockNumber);
+
+        BigDecimal sum = BigDecimal.ZERO;
+        for (BigDecimal price : prices) {
+            sum = sum.add(price, PRICE_MATH_CONTEXT);
+        }
+        BigDecimal average = sum.divide(BigDecimal.valueOf(prices.size()), 18, RoundingMode.HALF_UP);
+        return Optional.of(average);
     }
 
     /**
-     * 遍历池子集合获取最佳价格
+     * 遍历池子集合并收集价格
      *
      * @param pairs       池子列表
      * @param baseToken   基础代币
      * @param blockNumber 区块高度
-     * @return 价格
+     * @return 价格列表
      */
-    private Optional<BigDecimal> getBestPriceFromPairs(List<PairMetadata> pairs, String baseToken, BigInteger blockNumber) {
+    private List<BigDecimal> collectPricesFromPairs(List<PairMetadata> pairs, String baseToken, BigInteger blockNumber) {
+        if (pairs == null || pairs.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<BigDecimal> prices = new ArrayList<>();
         for (PairMetadata metadata : pairs) {
             Optional<BigDecimal> price = calculatePrice(metadata, baseToken, blockNumber);
-            if (price.isPresent()) {
-                return price.map(value -> value.setScale(18, RoundingMode.HALF_UP));
-            }
+            price.ifPresent(value -> prices.add(value.setScale(18, RoundingMode.HALF_UP)));
         }
-        return Optional.empty();
+        return prices;
     }
 
     /**
@@ -517,6 +528,21 @@ public class DexPriceService {
             }
         }
         return pools;
+    }
+
+    /**
+     * 查找或创建所有可用的 V4 池子信息
+     *
+     * <p>目前 V4 工厂缺乏稳定的 on-chain 查询接口，此处预留扩展点，
+     * 以便将 LiquidityMonitorService 等组件捕获的池子元数据注入缓存后复用。</p>
+     *
+     * @param tokenA 代币 A
+     * @param tokenB 代币 B
+     * @return 池子信息列表
+     */
+    public List<PairMetadata> findOrCreateV4Pools(String tokenA, String tokenB) {
+        // 目前返回空列表，后续可通过订阅事件或外部数据源填充 V4 池子缓存。
+        return Collections.emptyList();
     }
 
     /**
