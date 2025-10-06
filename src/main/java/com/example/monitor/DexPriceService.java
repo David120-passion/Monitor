@@ -39,6 +39,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * DEX 价格服务
@@ -67,6 +68,10 @@ public class DexPriceService {
     private final Map<String, PairMetadata> pairCacheByAddress = new ConcurrentHashMap<>();
     /** 按 token、顺序与费率缓存的 V3 池子信息 */
     private final Map<String, Map<String, PairMetadata>> v3PoolCache = new ConcurrentHashMap<>();
+    /** 区块价格缓存 */
+    private final Map<BigInteger, BigDecimal> priceCache = new ConcurrentHashMap<>();
+    /** 最近一次成功获取的价格 */
+    private final AtomicReference<BigDecimal> lastKnownPrice = new AtomicReference<>();
 
     /** 价格计算精度 */
     private static final MathContext PRICE_MATH_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
@@ -94,9 +99,18 @@ public class DexPriceService {
      * @return 价格
      */
     public Optional<BigDecimal> getPriceAtBlock(BigInteger blockNumber) {
+        if (blockNumber == null) {
+            return Optional.ofNullable(lastKnownPrice.get());
+        }
+
+        BigDecimal cached = priceCache.get(blockNumber);
+        if (cached != null) {
+            return Optional.of(cached);
+        }
+
         Optional<BigDecimal> directBusd = getBestPriceForPair(tokenAddress, DexConstants.USDT_ADDRESS, blockNumber);
         if (directBusd.isPresent()) {
-            return directBusd.map(value -> value.setScale(8, RoundingMode.HALF_UP));
+            return Optional.of(storePrice(blockNumber, directBusd.get()));
         }
 
         Optional<BigDecimal> viaWbnb = combinePrices(
@@ -104,10 +118,29 @@ public class DexPriceService {
                 getBestPriceForPair(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, blockNumber)
         );
         if (viaWbnb.isPresent()) {
-            return viaWbnb.map(value -> value.setScale(8, RoundingMode.HALF_UP));
+            return Optional.of(storePrice(blockNumber, viaWbnb.get()));
+        }
+
+        BigDecimal fallback = lastKnownPrice.get();
+        if (fallback != null) {
+            return Optional.of(fallback);
         }
 
         return Optional.empty();
+    }
+
+    /**
+     * 缓存并规范化价格
+     *
+     * @param blockNumber 区块高度
+     * @param price       原始价格
+     * @return 规范化后的价格
+     */
+    private BigDecimal storePrice(BigInteger blockNumber, BigDecimal price) {
+        BigDecimal normalized = price.setScale(8, RoundingMode.HALF_UP);
+        priceCache.put(blockNumber, normalized);
+        lastKnownPrice.set(normalized);
+        return normalized;
     }
 
     /**
