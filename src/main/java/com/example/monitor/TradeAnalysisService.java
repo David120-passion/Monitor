@@ -1,0 +1,483 @@
+package com.example.monitor;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.web3j.abi.EventEncoder;
+import org.web3j.abi.FunctionReturnDecoder;
+import org.web3j.abi.TypeReference;
+import org.web3j.abi.datatypes.Address;
+import org.web3j.abi.datatypes.Event;
+import org.web3j.abi.datatypes.Type;
+import org.web3j.abi.datatypes.generated.Int24;
+import org.web3j.abi.datatypes.generated.Int256;
+import org.web3j.abi.datatypes.generated.Uint128;
+import org.web3j.abi.datatypes.generated.Uint256;
+import org.web3j.abi.datatypes.generated.Uint160;
+import org.web3j.protocol.Web3j;
+import org.web3j.protocol.core.DefaultBlockParameter;
+import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.methods.request.EthFilter;
+import org.web3j.protocol.core.methods.response.EthBlock;
+import org.web3j.protocol.core.methods.response.Log;
+import org.web3j.protocol.core.methods.response.Transaction;
+import org.web3j.protocol.core.methods.response.TransactionReceipt;
+import org.web3j.utils.Numeric;
+
+import java.io.IOException;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.math.RoundingMode;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * 买卖分析服务
+ */
+public class TradeAnalysisService {
+    /** 日志记录器 */
+    private static final Logger log = LoggerFactory.getLogger(TradeAnalysisService.class);
+    /** 时间格式 */
+    private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
+    /** 目标时区（UTC+8） */
+    private static final ZoneId TARGET_ZONE = ZoneId.of("Asia/Shanghai");
+
+    /** Transfer 事件定义 */
+    private static final Event TRANSFER_EVENT = new Event("Transfer",
+            Arrays.asList(
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Uint256.class)
+            ));
+    /** Transfer 事件签名 */
+    private static final String TRANSFER_EVENT_SIGNATURE = EventEncoder.encode(TRANSFER_EVENT)
+            .toLowerCase(Locale.ROOT);
+
+    /** V2 Swap 事件签名 */
+    private static final String SWAP_EVENT_SIGNATURE_V2 = EventEncoder.encode(new Event("Swap",
+            Arrays.asList(
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Uint256.class),
+                    TypeReference.create(Uint256.class),
+                    TypeReference.create(Uint256.class),
+                    TypeReference.create(Uint256.class),
+                    TypeReference.create(Address.class, true)
+            )));
+
+    /** V3 Swap 事件签名 */
+    private static final String SWAP_EVENT_SIGNATURE_V3 = EventEncoder.encode(new Event("Swap",
+            Arrays.asList(
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Int256.class),
+                    TypeReference.create(Int256.class),
+                    TypeReference.create(Uint160.class),
+                    TypeReference.create(Uint128.class),
+                    TypeReference.create(Int24.class)
+            )));
+
+    /** 支持的 Swap 事件签名集合 */
+    private static final Set<String> SUPPORTED_SWAP_SIGNATURES = new HashSet<>(Arrays.asList(
+            SWAP_EVENT_SIGNATURE_V2.toLowerCase(Locale.ROOT),
+            SWAP_EVENT_SIGNATURE_V3.toLowerCase(Locale.ROOT)
+    ));
+
+    /** Web3j 客户端 */
+    private final Web3j web3j;
+    /** 监控的代币地址 */
+    private final String tokenAddress;
+    /** 代币符号 */
+    private final String tokenSymbol;
+    /** 价格服务 */
+    private final DexPriceService priceService;
+
+    /** 总买入数量 */
+    private BigDecimal totalBuyAmount = BigDecimal.ZERO;
+    /** 总卖出数量 */
+    private BigDecimal totalSellAmount = BigDecimal.ZERO;
+    /** 总买入金额（USD） */
+    private BigDecimal totalBuyValue = BigDecimal.ZERO;
+    /** 总卖出金额（USD） */
+    private BigDecimal totalSellValue = BigDecimal.ZERO;
+    /** 成交统计锁 */
+    private final Object aggregateLock = new Object();
+    /** 成交计数 */
+    private long tradeCounter = 0L;
+    /** 已处理的交易哈希 */
+    private final Set<String> processedTransactions = ConcurrentHashMap.newKeySet();
+    /** 代币精度因子 */
+    private final BigDecimal decimalFactor;
+
+    /**
+     * 构造函数
+     */
+    public TradeAnalysisService(Web3j web3j, String tokenAddress, BigInteger tokenDecimals, String tokenSymbol,
+                                DexPriceService priceService) {
+        this.web3j = web3j;
+        this.tokenAddress = tokenAddress.toLowerCase(Locale.ROOT);
+        this.tokenSymbol = tokenSymbol;
+        this.priceService = priceService;
+        int decimals = tokenDecimals == null ? 18 : Math.max(tokenDecimals.intValue(), 0);
+        this.decimalFactor = BigDecimal.TEN.pow(decimals);
+    }
+
+    /**
+     * 启动监听
+     */
+    public void start() {
+        EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, tokenAddress);
+        filter.addSingleTopic(EventEncoder.encode(TRANSFER_EVENT));
+        web3j.ethLogFlowable(filter).subscribe(this::handleTransferLog, throwable ->
+                log.error("Error processing trade analysis transfer log", throwable));
+    }
+
+    /**
+     * 处理 Transfer 日志
+     *
+     * @param logEntry 日志
+     */
+    private void handleTransferLog(Log logEntry) {
+        try {
+            String txHash = logEntry.getTransactionHash();
+            if (txHash == null || txHash.isEmpty()) {
+                return;
+            }
+
+            if (!processedTransactions.add(txHash)) {
+                return;
+            }
+
+            Optional<Transaction> transactionOpt = fetchTransaction(txHash);
+            if (transactionOpt.isEmpty()) {
+                return;
+            }
+            String txFrom = transactionOpt.get().getFrom();
+            if (txFrom == null) {
+                return;
+            }
+            String txFromNormalized = normalizeAddress(txFrom);
+
+            Optional<TransactionReceipt> receiptOpt = fetchTransactionReceipt(txHash);
+            if (receiptOpt.isEmpty()) {
+                return;
+            }
+            TransactionReceipt receipt = receiptOpt.get();
+            if (receipt.getLogs() == null || receipt.getLogs().isEmpty()) {
+                return;
+            }
+
+            Optional<TradeDetection> detectionOpt = analyseTransactionLogs(txFromNormalized, receipt.getLogs());
+            if (detectionOpt.isEmpty()) {
+                return;
+            }
+            TradeDetection detection = detectionOpt.get();
+
+            BigInteger blockNumber = logEntry.getBlockNumber();
+            if (blockNumber == null) {
+                blockNumber = receipt.getBlockNumber();
+                if (blockNumber == null) {
+                    return;
+                }
+            }
+            Optional<Long> timestampOpt = fetchBlockTimestamp(blockNumber);
+            long timestamp = timestampOpt.orElse(Instant.now().toEpochMilli());
+            Optional<BigDecimal> priceOpt = priceService.getPriceAtBlock(blockNumber);
+            BigDecimal price = priceOpt.orElse(BigDecimal.ZERO);
+            BigDecimal usdValue = detection.tradeAmount.multiply(price);
+
+            TradeSummary summary = updateTotals(detection.direction, detection.tradeAmount, usdValue);
+
+            log.info("TRADE address={} action={} amount={} {} price=${} value=${} totalBuyAmount={} totalSellAmount={} " +
+                            "totalBuyValue=${} totalSellValue=${} netAmount={} netValue=${} avgBuyPrice=${} avgSellPrice=${} trades={} " +
+                            "grossIn={} grossOut={} block={} time={} txHash={}",
+                    txFrom,
+                    detection.direction.getDisplay(),
+                    detection.tradeAmount.setScale(6, RoundingMode.HALF_UP),
+                    tokenSymbol,
+                    price.setScale(8, RoundingMode.HALF_UP),
+                    usdValue.setScale(6, RoundingMode.HALF_UP),
+                    summary.totalBuyAmount.setScale(6, RoundingMode.HALF_UP),
+                    summary.totalSellAmount.setScale(6, RoundingMode.HALF_UP),
+                    summary.totalBuyValue.setScale(6, RoundingMode.HALF_UP),
+                    summary.totalSellValue.setScale(6, RoundingMode.HALF_UP),
+                    summary.netAmount.setScale(6, RoundingMode.HALF_UP),
+                    summary.netValue.setScale(6, RoundingMode.HALF_UP),
+                    summary.avgBuyPrice.setScale(8, RoundingMode.HALF_UP),
+                    summary.avgSellPrice.setScale(8, RoundingMode.HALF_UP),
+                    summary.tradeCount,
+                    detection.totalIn.setScale(6, RoundingMode.HALF_UP),
+                    detection.totalOut.setScale(6, RoundingMode.HALF_UP),
+                    blockNumber,
+                    Instant.ofEpochMilli(timestamp).atZone(TARGET_ZONE).format(TIME_FORMATTER),
+                    txHash);
+        } catch (Exception ex) {
+            log.error("Failed to analyse trade", ex);
+        }
+    }
+
+    /**
+     * 分析交易日志，匹配 Swap 与 Transfer 事件
+     *
+     * @param txFromNormalized 交易发起人地址（小写）
+     * @param logs             交易所有日志
+     * @return 交易识别结果
+     */
+    private Optional<TradeDetection> analyseTransactionLogs(String txFromNormalized, List<Log> logs) {
+        if (logs == null || logs.isEmpty()) {
+            return Optional.empty();
+        }
+        BigInteger totalInRaw = BigInteger.ZERO;
+        BigInteger totalOutRaw = BigInteger.ZERO;
+        boolean swapDetected = false;
+
+        for (Log entry : logs) {
+            List<String> topics = entry.getTopics();
+            if (topics == null || topics.isEmpty()) {
+                continue;
+            }
+            String topic0 = topics.get(0).toLowerCase(Locale.ROOT);
+            if (SUPPORTED_SWAP_SIGNATURES.contains(topic0)) {
+                swapDetected = true;
+            }
+
+            if (!tokenAddress.equalsIgnoreCase(entry.getAddress())) {
+                continue;
+            }
+            if (!TRANSFER_EVENT_SIGNATURE.equals(topic0)) {
+                continue;
+            }
+            if (topics.size() < 3) {
+                continue;
+            }
+            String from = decodeAddress(topics.get(1));
+            String to = decodeAddress(topics.get(2));
+            List<Type> decoded = FunctionReturnDecoder.decode(entry.getData(), TRANSFER_EVENT.getNonIndexedParameters());
+            if (decoded.isEmpty()) {
+                continue;
+            }
+            BigInteger value = (BigInteger) decoded.get(0).getValue();
+            if (txFromNormalized.equals(normalizeAddress(from))) {
+                totalOutRaw = totalOutRaw.add(value);
+            }
+            if (txFromNormalized.equals(normalizeAddress(to))) {
+                totalInRaw = totalInRaw.add(value);
+            }
+        }
+
+        if (!swapDetected) {
+            return Optional.empty();
+        }
+
+        BigDecimal totalIn = toDecimalAmount(totalInRaw);
+        BigDecimal totalOut = toDecimalAmount(totalOutRaw);
+        if (totalIn.signum() == 0 && totalOut.signum() == 0) {
+            return Optional.empty();
+        }
+
+        BigDecimal tradeAmount;
+        TradeDirection direction;
+        if (totalIn.signum() > 0 && totalOut.signum() == 0) {
+            direction = TradeDirection.BUY;
+            tradeAmount = totalIn;
+        } else if (totalOut.signum() > 0 && totalIn.signum() == 0) {
+            direction = TradeDirection.SELL;
+            tradeAmount = totalOut;
+        } else {
+            BigDecimal net = totalIn.subtract(totalOut);
+            if (net.signum() == 0) {
+                return Optional.empty();
+            }
+            direction = net.signum() > 0 ? TradeDirection.BUY : TradeDirection.SELL;
+            tradeAmount = net.abs();
+        }
+
+        return Optional.of(new TradeDetection(direction, tradeAmount, totalIn, totalOut));
+    }
+
+    /**
+     * 更新统计汇总
+     *
+     * @param direction 交易方向
+     * @param amount    交易数量
+     * @param usdValue  交易价值
+     * @return 汇总结果
+     */
+    private TradeSummary updateTotals(TradeDirection direction, BigDecimal amount, BigDecimal usdValue) {
+        synchronized (aggregateLock) {
+            tradeCounter++;
+            if (direction == TradeDirection.BUY) {
+                totalBuyAmount = totalBuyAmount.add(amount);
+                totalBuyValue = totalBuyValue.add(usdValue);
+            } else {
+                totalSellAmount = totalSellAmount.add(amount);
+                totalSellValue = totalSellValue.add(usdValue);
+            }
+            BigDecimal netAmount = totalBuyAmount.subtract(totalSellAmount);
+            BigDecimal netValue = totalBuyValue.subtract(totalSellValue);
+            BigDecimal avgBuyPrice = totalBuyAmount.signum() == 0 ? BigDecimal.ZERO :
+                    totalBuyValue.divide(totalBuyAmount, 18, RoundingMode.HALF_UP);
+            BigDecimal avgSellPrice = totalSellAmount.signum() == 0 ? BigDecimal.ZERO :
+                    totalSellValue.divide(totalSellAmount, 18, RoundingMode.HALF_UP);
+            return new TradeSummary(totalBuyAmount, totalSellAmount, totalBuyValue, totalSellValue,
+                    netAmount, netValue, avgBuyPrice, avgSellPrice, tradeCounter);
+        }
+    }
+
+    /**
+     * 获取交易详情
+     *
+     * @param txHash 交易哈希
+     * @return 交易对象
+     */
+    private Optional<Transaction> fetchTransaction(String txHash) {
+        try {
+            return web3j.ethGetTransactionByHash(txHash).send().getTransaction();
+        } catch (IOException e) {
+            log.error("Failed to fetch transaction {}", txHash, e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 获取交易回执
+     *
+     * @param txHash 交易哈希
+     * @return 交易回执
+     */
+    private Optional<TransactionReceipt> fetchTransactionReceipt(String txHash) {
+        try {
+            return web3j.ethGetTransactionReceipt(txHash).send().getTransactionReceipt();
+        } catch (IOException e) {
+            log.error("Failed to fetch transaction receipt {}", txHash, e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 获取区块时间戳
+     *
+     * @param blockNumber 区块高度
+     * @return 时间戳
+     */
+    private Optional<Long> fetchBlockTimestamp(BigInteger blockNumber) {
+        try {
+            EthBlock block = web3j.ethGetBlockByNumber(DefaultBlockParameter.valueOf(blockNumber), false).send();
+            if (block.getBlock() == null) {
+                return Optional.empty();
+            }
+            return Optional.of(block.getBlock().getTimestamp().multiply(BigInteger.valueOf(1000L)).longValue());
+        } catch (IOException e) {
+            log.error("Failed to fetch block timestamp", e);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 归一化地址为小写
+     *
+     * @param address 地址
+     * @return 小写地址
+     */
+    private String normalizeAddress(String address) {
+        return address == null ? "" : address.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * 将原始数量转换为带精度的十进制表示
+     *
+     * @param raw 原始整数
+     * @return 十进制数量
+     */
+    private BigDecimal toDecimalAmount(BigInteger raw) {
+        if (raw == null || raw.signum() == 0) {
+            return BigDecimal.ZERO;
+        }
+        return new BigDecimal(raw).divide(decimalFactor, 18, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 解码地址
+     *
+     * @param topic 主题数据
+     * @return 地址
+     */
+    private String decodeAddress(String topic) {
+        String clean = Numeric.cleanHexPrefix(topic);
+        if (clean.length() < 40) {
+            clean = String.format("%40s", clean).replace(' ', '0');
+        }
+        return "0x" + clean.substring(clean.length() - 40);
+    }
+
+    /** 交易方向 */
+    private enum TradeDirection {
+        /** 买入 */
+        BUY("买入"),
+        /** 卖出 */
+        SELL("卖出");
+
+        /** 中文展示 */
+        private final String display;
+
+        TradeDirection(String display) {
+            this.display = display;
+        }
+
+        public String getDisplay() {
+            return display;
+        }
+    }
+
+    /**
+     * 交易汇总信息
+     */
+    private static class TradeSummary {
+        private final BigDecimal totalBuyAmount;
+        private final BigDecimal totalSellAmount;
+        private final BigDecimal totalBuyValue;
+        private final BigDecimal totalSellValue;
+        private final BigDecimal netAmount;
+        private final BigDecimal netValue;
+        private final BigDecimal avgBuyPrice;
+        private final BigDecimal avgSellPrice;
+        private final long tradeCount;
+
+        private TradeSummary(BigDecimal totalBuyAmount, BigDecimal totalSellAmount, BigDecimal totalBuyValue,
+                             BigDecimal totalSellValue, BigDecimal netAmount, BigDecimal netValue,
+                             BigDecimal avgBuyPrice, BigDecimal avgSellPrice, long tradeCount) {
+            this.totalBuyAmount = totalBuyAmount;
+            this.totalSellAmount = totalSellAmount;
+            this.totalBuyValue = totalBuyValue;
+            this.totalSellValue = totalSellValue;
+            this.netAmount = netAmount;
+            this.netValue = netValue;
+            this.avgBuyPrice = avgBuyPrice;
+            this.avgSellPrice = avgSellPrice;
+            this.tradeCount = tradeCount;
+        }
+    }
+
+    /**
+     * 交易识别结果
+     */
+    private static class TradeDetection {
+        private final TradeDirection direction;
+        private final BigDecimal tradeAmount;
+        private final BigDecimal totalIn;
+        private final BigDecimal totalOut;
+
+        private TradeDetection(TradeDirection direction, BigDecimal tradeAmount, BigDecimal totalIn, BigDecimal totalOut) {
+            this.direction = direction;
+            this.tradeAmount = tradeAmount;
+            this.totalIn = totalIn;
+            this.totalOut = totalOut;
+        }
+    }
+}
