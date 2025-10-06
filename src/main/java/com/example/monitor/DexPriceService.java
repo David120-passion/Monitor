@@ -9,6 +9,7 @@ import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Bool;
 import org.web3j.abi.datatypes.Function;
 import org.web3j.abi.datatypes.Type;
+import org.web3j.abi.datatypes.generated.Bytes32;
 import org.web3j.abi.datatypes.generated.Int24;
 import org.web3j.abi.datatypes.generated.Uint112;
 import org.web3j.abi.datatypes.generated.Uint160;
@@ -392,6 +393,9 @@ public class DexPriceService {
      * @return slot0 数据
      */
     private Optional<Slot0Data> getSlot0(PairMetadata pairMetadata, BigInteger blockNumber) {
+        if (pairMetadata.poolType == PoolType.V4) {
+            return getSlot0ForV4(pairMetadata, blockNumber);
+        }
         Function function = new Function(
                 "slot0",
                 Collections.emptyList(),
@@ -412,12 +416,56 @@ public class DexPriceService {
                         }
                 )
         );
+        return executeSlot0Call(pairMetadata, pairMetadata.pairAddress, function, blockNumber);
+    }
+
+    /**
+     * 查询 V4 池子的 slot0 数据
+     */
+    private Optional<Slot0Data> getSlot0ForV4(PairMetadata pairMetadata, BigInteger blockNumber) {
+        byte[] poolIdBytes = decodePoolId(pairMetadata.pairAddress);
+        if (poolIdBytes == null) {
+            log.warn("Failed to decode poolId for V4 pool {}", pairMetadata.pairAddress);
+            return Optional.empty();
+        }
+        String target = resolveV4Slot0Contract(pairMetadata.factoryAddress);
+        if (target == null) {
+            log.warn("Unsupported V4 manager {} for pool {}", pairMetadata.factoryAddress, pairMetadata.pairAddress);
+            return Optional.empty();
+        }
+        Function function = new Function(
+                "getSlot0",
+                Collections.singletonList(new Bytes32(poolIdBytes)),
+                Arrays.asList(
+                        new TypeReference<Uint160>() {
+                        },
+                        new TypeReference<Int24>() {
+                        },
+                        new TypeReference<Uint24>() {
+                        },
+                        new TypeReference<Uint24>() {
+                        }
+                )
+        );
+        return executeSlot0Call(pairMetadata, target, function, blockNumber);
+    }
+
+    /**
+     * 执行 slot0 查询并解析结果
+     */
+    private Optional<Slot0Data> executeSlot0Call(PairMetadata metadata, String contractAddress, Function function, BigInteger blockNumber) {
+        if (contractAddress == null) {
+            return Optional.empty();
+        }
         String data = FunctionEncoder.encode(function);
-        Transaction tx = Transaction.createEthCallTransaction(null, pairMetadata.pairAddress, data);
+        Transaction tx = Transaction.createEthCallTransaction(null, contractAddress, data);
+        DefaultBlockParameter blockParameter = blockNumber != null
+                ? DefaultBlockParameter.valueOf(blockNumber)
+                : DefaultBlockParameterName.LATEST;
         try {
-            EthCall response = web3j.ethCall(tx, DefaultBlockParameter.valueOf(blockNumber)).send();
+            EthCall response = web3j.ethCall(tx, blockParameter).send();
             if (response.isReverted()) {
-                log.warn("slot0 reverted for pool {}", pairMetadata.pairAddress);
+                log.warn("slot0 reverted for pool {} via contract {}", metadata.pairAddress, contractAddress);
                 return Optional.empty();
             }
             List<Type> values = FunctionReturnDecoder.decode(response.getValue(), function.getOutputParameters());
@@ -428,9 +476,50 @@ public class DexPriceService {
             int tick = ((Int24) values.get(1)).getValue().intValue();
             return Optional.of(new Slot0Data(sqrtPriceX96, tick));
         } catch (IOException e) {
-            log.error("Failed to query slot0 for pool {}", pairMetadata.pairAddress, e);
+            log.error("Failed to query slot0 for pool {} via contract {}", metadata.pairAddress, contractAddress, e);
             return Optional.empty();
         }
+    }
+
+    /**
+     * 将池子 ID 转换为 32 字节数组
+     */
+    private byte[] decodePoolId(String poolId) {
+        if (poolId == null) {
+            return null;
+        }
+        byte[] raw = Numeric.hexStringToByteArray(poolId);
+        if (raw.length == 32) {
+            return raw;
+        }
+        if (raw.length > 32) {
+            byte[] trimmed = new byte[32];
+            System.arraycopy(raw, raw.length - 32, trimmed, 0, 32);
+            return trimmed;
+        }
+        byte[] padded = new byte[32];
+        System.arraycopy(raw, 0, padded, 32 - raw.length, raw.length);
+        return padded;
+    }
+
+    /**
+     * 解析 V4 slot0 查询目标合约
+     */
+    private String resolveV4Slot0Contract(String managerAddress) {
+        if (managerAddress == null) {
+            return null;
+        }
+        String normalizedManager = normalize(managerAddress);
+        if (normalizedManager == null) {
+            return null;
+        }
+        if (normalizedManager.equals(normalize(DexConstants.PANCAKE_V4_FACTORY))) {
+            return normalizedManager;
+        }
+        if (normalizedManager.equals(normalize(DexConstants.UNISWAP_V4_FACTORY))) {
+            return normalize(DexConstants.UNISWAP_V4_STATE_VIEW);
+        }
+        return null;
     }
 
     /**
