@@ -40,6 +40,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Collectors;
 
 /**
  * DEX 价格服务
@@ -162,12 +163,42 @@ public class DexPriceService {
             return Optional.empty();
         }
 
-        BigDecimal sum = BigDecimal.ZERO;
-        for (BigDecimal price : prices) {
-            sum = sum.add(price, PRICE_MATH_CONTEXT);
+        Optional<BigDecimal> average = calculateMedianPrice(prices);
+
+        return average;
+    }
+
+    /**
+     * 计算价格中位数
+     * @param prices
+     * @return
+     */
+    private Optional<BigDecimal> calculateMedianPrice(List<BigDecimal> prices) {
+        if (prices == null || prices.isEmpty()) {
+            return Optional.empty();
         }
-        BigDecimal average = sum.divide(BigDecimal.valueOf(prices.size()), 18, RoundingMode.HALF_UP);
-        return Optional.of(average);
+
+        // 过滤掉 null 或 ≤0 的价格
+        List<BigDecimal> validPrices = prices.stream()
+                .filter(p -> p != null && p.compareTo(BigDecimal.ZERO) > 0)
+                .sorted()
+                .collect(Collectors.toList());
+
+        if (validPrices.isEmpty()) {
+            return Optional.empty();
+        }
+
+        int size = validPrices.size();
+        if (size % 2 == 1) {
+            // 奇数个，直接取中间值
+            return Optional.of(validPrices.get(size / 2));
+        } else {
+            // 偶数个，取中间两个的平均值
+            BigDecimal p1 = validPrices.get(size / 2 - 1);
+            BigDecimal p2 = validPrices.get(size / 2);
+            BigDecimal median = p1.add(p2).divide(BigDecimal.valueOf(2), 18, RoundingMode.HALF_UP);
+            return Optional.of(median);
+        }
     }
 
     /**

@@ -47,7 +47,8 @@ public class DexConstants {
     public static final List<BigInteger> V3_FEE_TIERS = Collections.unmodifiableList(Arrays.asList(
             BigInteger.valueOf(100),      // 0.01%
             BigInteger.valueOf(500),      // 0.05%
-            BigInteger.valueOf(2500),     // 0.25%
+            BigInteger.valueOf(2500),
+            BigInteger.valueOf(3000),// 0.25%
             BigInteger.valueOf(10000)     // 1%
     ));
 

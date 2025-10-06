@@ -25,7 +25,7 @@ public class BscTokenMonitor {
      * @throws InterruptedException 中断异常
      */
     public static void main(String[] args) throws InterruptedException {
-        String tokenAddress = "0x810df4c7daf4ee06ae7c621d0680e73a505c9a06";
+        String tokenAddress = "0x302dfaf2cdbe51a18d97186a7384e87cf599877d";
         Web3j web3j = Web3j.build(new HttpService(DEFAULT_RPC_ENDPOINT));
         TokenInfoService tokenInfoService = new TokenInfoService(web3j);
         BigInteger decimals = tokenInfoService.loadDecimals(tokenAddress).orElse(BigInteger.valueOf(18));
@@ -54,3 +54,7 @@ public class BscTokenMonitor {
         latch.await();
     }
 }
+
+/**
+
+ */

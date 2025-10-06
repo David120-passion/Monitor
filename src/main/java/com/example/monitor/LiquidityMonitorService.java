@@ -93,7 +93,7 @@ public class LiquidityMonitorService {
             Arrays.asList(
                     TypeReference.create(Address.class, true),
                     TypeReference.create(Address.class, true),
-                    TypeReference.create(Uint24.class),
+                    TypeReference.create(Uint24.class,true),
                     TypeReference.create(Int24.class),
                     TypeReference.create(Address.class)
             ));
@@ -310,13 +310,13 @@ public class LiquidityMonitorService {
                 }
                 String token0 = decodeAddress(topics.get(1));
                 String token1 = decodeAddress(topics.get(2));
+                BigInteger fee = new BigInteger(topics.get(3).substring(2),16);
                 List<Type> data = decodeEventData(logEntry.getData(), event);
-                if (data.size() < 3) {
+                if (data.size() < 2) {
                     return;
                 }
-                BigInteger fee = (BigInteger) data.get(0).getValue();
-                BigInteger tickSpacing = (BigInteger) data.get(1).getValue();
-                String poolAddress = data.get(2).getValue().toString();
+                BigInteger tickSpacing = (BigInteger) data.get(0).getValue();
+                String poolAddress = data.get(1).getValue().toString();
                 if (matchesTarget(token0, token1)) {
                     Optional<DexPriceService.PairMetadata> metadataOpt = priceService.loadPairMetadata(poolAddress, false,
                             DexPriceService.PoolType.V3, fee);

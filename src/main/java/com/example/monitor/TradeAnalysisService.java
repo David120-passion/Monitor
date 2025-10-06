@@ -132,6 +132,17 @@ public class TradeAnalysisService {
      * 启动监听
      */
     public void start() {
+//        BigInteger startBlock = BigInteger.valueOf(
+//                63654079
+//        );
+//        BigInteger endBlock = BigInteger.valueOf(
+//                63654081
+//        );
+//        EthFilter filter = new EthFilter(
+//                DefaultBlockParameter.valueOf(startBlock),
+//                DefaultBlockParameter.valueOf(endBlock), // 一直扫描到最新区块
+//                tokenAddress);
+
         EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, tokenAddress);
         filter.addSingleTopic(EventEncoder.encode(TRANSFER_EVENT));
         web3j.ethLogFlowable(filter).subscribe(this::handleTransferLog, throwable ->
@@ -155,7 +166,7 @@ public class TradeAnalysisService {
             }
 
             Optional<Transaction> transactionOpt = fetchTransaction(txHash);
-            if (transactionOpt.isEmpty()) {
+            if (!transactionOpt.isPresent()) {
                 return;
             }
             String txFrom = transactionOpt.get().getFrom();
@@ -165,7 +176,7 @@ public class TradeAnalysisService {
             String txFromNormalized = normalizeAddress(txFrom);
 
             Optional<TransactionReceipt> receiptOpt = fetchTransactionReceipt(txHash);
-            if (receiptOpt.isEmpty()) {
+            if (!receiptOpt.isPresent()) {
                 return;
             }
             TransactionReceipt receipt = receiptOpt.get();
@@ -174,7 +185,7 @@ public class TradeAnalysisService {
             }
 
             Optional<TradeDetection> detectionOpt = analyseTransactionLogs(txFromNormalized, receipt.getLogs());
-            if (detectionOpt.isEmpty()) {
+            if (!detectionOpt.isPresent()) {
                 return;
             }
             TradeDetection detection = detectionOpt.get();
