@@ -39,14 +39,12 @@ public class BscTokenMonitor {
         log.info("Starting monitor for token={} decimals={}", symbol, decimals);
 
         DexPriceService priceService = new DexPriceService(web3j, tokenAddress, decimals, symbol);
-        TransferAggregator aggregator = new TransferAggregator();
-        TransferMonitorService transferMonitorService = new TransferMonitorService(web3j, tokenAddress, decimals, symbol, priceService, aggregator);
         TradeAnalysisService tradeAnalysisService = new TradeAnalysisService(web3j, tokenAddress, decimals, symbol, priceService);
-        LiquidityMonitorService liquidityMonitorService = new LiquidityMonitorService(web3j, tokenAddress, priceService, transferMonitorService, creationBlockOpt.orElse(null));
+        LiquidityMonitorService liquidityMonitorService = new LiquidityMonitorService(web3j, tokenAddress, priceService,
+                tradeAnalysisService, creationBlockOpt.orElse(null));
         log.info("v2 v3开始初始化");
         liquidityMonitorService.registerInitialPairs();
         liquidityMonitorService.start();
-        transferMonitorService.start();
         tradeAnalysisService.start();
 
         log.info("Monitor started. Press Ctrl+C to exit.");

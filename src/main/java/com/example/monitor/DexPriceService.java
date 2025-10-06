@@ -69,6 +69,8 @@ public class DexPriceService {
     private final Map<String, PairMetadata> pairCacheByAddress = new ConcurrentHashMap<>();
     /** 按 token、顺序与费率缓存的 V3 池子信息 */
     private final Map<String, Map<String, PairMetadata>> v3PoolCache = new ConcurrentHashMap<>();
+    /** 按 token、顺序缓存的 V4 池子信息 */
+    private final Map<String, Map<String, PairMetadata>> v4PoolCache = new ConcurrentHashMap<>();
     /** 区块价格缓存 */
     private final Map<BigInteger, BigDecimal> priceCache = new ConcurrentHashMap<>();
     /** 最近一次成功获取的价格 */
@@ -248,7 +250,7 @@ public class DexPriceService {
         if (metadata == null) {
             return Optional.empty();
         }
-        if (metadata.poolType == PoolType.V3) {
+        if (metadata.poolType == PoolType.V3 || metadata.poolType == PoolType.V4) {
             return calculateV3Price(metadata, baseToken, blockNumber);
         }
         return calculateV2Price(metadata, baseToken, blockNumber);
@@ -590,8 +592,25 @@ public class DexPriceService {
      * @return 池子信息列表
      */
     public List<PairMetadata> findOrCreateV4Pools(String tokenA, String tokenB) {
-        // 目前返回空列表，后续可通过订阅事件或外部数据源填充 V4 池子缓存。
-        return Collections.emptyList();
+        String key = buildPairKey(tokenA, tokenB);
+        Map<String, PairMetadata> cachedByAddress = v4PoolCache.get(key);
+        if (cachedByAddress == null || cachedByAddress.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return new ArrayList<>(cachedByAddress.values());
+    }
+
+    /**
+     * 注册外部已知的 V4 池子元数据
+     *
+     * @param metadata 池子元数据
+     */
+    public void registerV4Pool(PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return;
+        }
+        PairMetadata normalized = metadata.withPoolType(PoolType.V4);
+        cachePairMetadata(normalized, true);
     }
 
     /**
@@ -746,6 +765,10 @@ public class DexPriceService {
             addV3PoolToCache(metadata.token0, metadata.token1, metadata.fee, metadata);
             addV3PoolToCache(metadata.token1, metadata.token0, metadata.fee, metadata);
         }
+        if (metadata.poolType == PoolType.V4) {
+            addV4PoolToCache(metadata.token0, metadata.token1, metadata);
+            addV4PoolToCache(metadata.token1, metadata.token0, metadata);
+        }
     }
 
     /**
@@ -779,6 +802,23 @@ public class DexPriceService {
         }
         String key = buildV3PoolKey(tokenA, tokenB, fee);
         v3PoolCache.compute(key, (k, existing) -> {
+            Map<String, PairMetadata> updated = existing == null ? new LinkedHashMap<>() : new LinkedHashMap<>(existing);
+            String normalizedAddress = normalize(metadata.pairAddress);
+            updated.put(normalizedAddress, metadata);
+            return updated;
+        });
+    }
+
+    /**
+     * 将 V4 池子加入缓存
+     *
+     * @param tokenA   代币 A
+     * @param tokenB   代币 B
+     * @param metadata 池子元数据
+     */
+    private void addV4PoolToCache(String tokenA, String tokenB, PairMetadata metadata) {
+        String key = buildPairKey(tokenA, tokenB);
+        v4PoolCache.compute(key, (k, existing) -> {
             Map<String, PairMetadata> updated = existing == null ? new LinkedHashMap<>() : new LinkedHashMap<>(existing);
             String normalizedAddress = normalize(metadata.pairAddress);
             updated.put(normalizedAddress, metadata);
