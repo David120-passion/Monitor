@@ -12,6 +12,7 @@ import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Bytes32;
 import org.web3j.abi.datatypes.generated.Int24;
 import org.web3j.abi.datatypes.generated.Uint112;
+import org.web3j.abi.datatypes.generated.Uint128;
 import org.web3j.abi.datatypes.generated.Uint160;
 import org.web3j.abi.datatypes.generated.Uint16;
 import org.web3j.abi.datatypes.generated.Uint24;
@@ -32,6 +33,7 @@ import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -40,6 +42,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
@@ -76,9 +82,15 @@ public class DexPriceService {
     private final Map<BigInteger, BigDecimal> priceCache = new ConcurrentHashMap<>();
     /** 最近一次成功获取的价格 */
     private final AtomicReference<BigDecimal> lastKnownPrice = new AtomicReference<>();
+    /** 池子价格样本缓存 */
+    private final Map<String, PriceSample> poolPriceCache = new ConcurrentHashMap<>();
+    /** 价格刷新调度器 */
+    private final ScheduledExecutorService priceRefreshExecutor;
 
     /** 价格计算精度 */
     private static final MathContext PRICE_MATH_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
+    /** 价格样本最大存活时间（毫秒） */
+    private static final long PRICE_SAMPLE_TTL_MILLIS = 15_000L;
 
     /**
      * 构造函数
@@ -94,6 +106,252 @@ public class DexPriceService {
         this.tokenDecimals = tokenDecimals;
         this.tokenSymbol = tokenSymbol;
         this.tokenInfoService = new TokenInfoService(web3j);
+        this.priceRefreshExecutor = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r, "dex-price-refresh");
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
+        initializePriceSampler();
+    }
+
+    /**
+     * 初始化价格采样器，预加载常用池子并启动后台刷新任务
+     */
+    private void initializePriceSampler() {
+        try {
+            refreshInitialPools();
+        } catch (Exception ex) {
+            log.warn("Failed to preload pools for price sampler", ex);
+        }
+        startPriceRefreshTask();
+    }
+
+    /**
+     * 扫描目标代币常见的交易池以初始化缓存
+     */
+    private void refreshInitialPools() {
+        List<PairMetadata> initialPools = new ArrayList<>();
+        initialPools.addAll(findOrCreatePairs(tokenAddress, DexConstants.USDT_ADDRESS));
+        initialPools.addAll(findOrCreatePairs(tokenAddress, DexConstants.WBNB_ADDRESS));
+        initialPools.addAll(findOrCreateV3Pools(tokenAddress, DexConstants.USDT_ADDRESS));
+        initialPools.addAll(findOrCreateV3Pools(tokenAddress, DexConstants.WBNB_ADDRESS));
+        initialPools.addAll(findOrCreateV4Pools(tokenAddress, DexConstants.USDT_ADDRESS));
+        initialPools.addAll(findOrCreateV4Pools(tokenAddress, DexConstants.WBNB_ADDRESS));
+        initialPools.addAll(findOrCreatePairs(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
+        initialPools.addAll(findOrCreateV3Pools(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
+        initialPools.addAll(findOrCreateV4Pools(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
+
+        Set<String> seen = new HashSet<>();
+        for (PairMetadata metadata : initialPools) {
+            if (metadata == null || metadata.pairAddress == null) {
+                continue;
+            }
+            String key = normalize(metadata.pairAddress);
+            if (seen.add(key)) {
+                refreshPriceForPool(metadata);
+            }
+        }
+        log.info("Initialized price cache for {} pools", seen.size());
+    }
+
+    /**
+     * 启动后台价格刷新线程
+     */
+    private void startPriceRefreshTask() {
+        priceRefreshExecutor.scheduleAtFixedRate(() -> {
+            try {
+                refreshAllKnownPools();
+            } catch (Exception ex) {
+                log.error("Failed to refresh pool prices", ex);
+            }
+        }, 0L, 5L, TimeUnit.SECONDS);
+    }
+
+    /**
+     * 刷新所有已知池子的价格样本
+     */
+    private void refreshAllKnownPools() {
+        List<PairMetadata> snapshot = new ArrayList<>(pairCacheByAddress.values());
+        for (PairMetadata metadata : snapshot) {
+            refreshPriceForPool(metadata);
+        }
+    }
+
+    /**
+     * 刷新指定池子的价格样本
+     */
+    private Optional<PriceSample> refreshPriceForPool(PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return Optional.empty();
+        }
+        try {
+            Optional<PriceSample> sampleOpt = buildPriceSample(metadata);
+            sampleOpt.ifPresent(sample -> poolPriceCache.put(normalize(metadata.pairAddress), sample));
+            return sampleOpt;
+        } catch (Exception ex) {
+            log.debug("Failed to refresh price sample for pool {}", metadata.pairAddress, ex);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 根据池子类型构建价格样本
+     */
+    private Optional<PriceSample> buildPriceSample(PairMetadata metadata) {
+        if (metadata.poolType == PoolType.V3 || metadata.poolType == PoolType.V4) {
+            return buildConcentratedPriceSample(metadata);
+        }
+        return buildV2PriceSample(metadata);
+    }
+
+    /**
+     * 构建 V2 池子的价格样本
+     */
+    private Optional<PriceSample> buildV2PriceSample(PairMetadata metadata) {
+        Optional<Reserves> reservesOpt = getReserves(metadata, null);
+        if (!reservesOpt.isPresent()) {
+            return Optional.empty();
+        }
+        Reserves reserves = reservesOpt.get();
+        BigInteger token0Decimals = metadata.token0Decimals != null ? metadata.token0Decimals : fetchDecimals(metadata.token0);
+        BigInteger token1Decimals = metadata.token1Decimals != null ? metadata.token1Decimals : fetchDecimals(metadata.token1);
+        BigDecimal reserve0 = reserves.getReserve0()
+                .divide(BigDecimal.TEN.pow(token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
+        BigDecimal reserve1 = reserves.getReserve1()
+                .divide(BigDecimal.TEN.pow(token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
+        if (!hasSufficientLiquidity(reserve0, reserve1)) {
+            return Optional.empty();
+        }
+        if (reserve0.compareTo(BigDecimal.ZERO) <= 0 || reserve1.compareTo(BigDecimal.ZERO) <= 0) {
+            return Optional.empty();
+        }
+        BigDecimal priceToken1PerToken0 = reserve1.divide(reserve0, 18, RoundingMode.HALF_UP);
+        BigDecimal priceToken0PerToken1 = priceToken1PerToken0.compareTo(BigDecimal.ZERO) > 0
+                ? BigDecimal.ONE.divide(priceToken1PerToken0, 18, RoundingMode.HALF_UP)
+                : null;
+        BigDecimal tvlInToken1 = priceToken1PerToken0.multiply(reserve0, PRICE_MATH_CONTEXT).add(reserve1);
+        BigDecimal tvlInToken0 = priceToken0PerToken1 != null
+                ? priceToken0PerToken1.multiply(reserve1, PRICE_MATH_CONTEXT).add(reserve0)
+                : reserve0;
+        long now = System.currentTimeMillis();
+        return Optional.of(new PriceSample(metadata,
+                priceToken1PerToken0,
+                priceToken0PerToken1,
+                reserve0,
+                reserve1,
+                tvlInToken1,
+                tvlInToken0,
+                tvlInToken1,
+                now));
+    }
+
+    /**
+     * 构建 V3/V4 池子的价格样本
+     */
+    private Optional<PriceSample> buildConcentratedPriceSample(PairMetadata metadata) {
+        Optional<Slot0Data> slot0Opt = getSlot0(metadata, null);
+        if (!slot0Opt.isPresent()) {
+            return Optional.empty();
+        }
+        Optional<BigDecimal> priceOpt = derivePriceToken1PerToken0(slot0Opt.get(), metadata);
+        if (!priceOpt.isPresent()) {
+            return Optional.empty();
+        }
+        BigDecimal priceToken1PerToken0 = priceOpt.get();
+        BigDecimal priceToken0PerToken1 = priceToken1PerToken0.compareTo(BigDecimal.ZERO) > 0
+                ? BigDecimal.ONE.divide(priceToken1PerToken0, 18, RoundingMode.HALF_UP)
+                : null;
+        BigDecimal liquidity = fetchConcentratedLiquidity(metadata);
+        long now = System.currentTimeMillis();
+        return Optional.of(new PriceSample(metadata,
+                priceToken1PerToken0,
+                priceToken0PerToken1,
+                null,
+                null,
+                null,
+                null,
+                liquidity,
+                now));
+    }
+
+    /**
+     * 根据 slot0 结果推导 token1/token0 价格
+     */
+    private Optional<BigDecimal> derivePriceToken1PerToken0(Slot0Data slot0, PairMetadata metadata) {
+        if (slot0 == null || metadata == null || slot0.sqrtPriceX96 == null || slot0.sqrtPriceX96.equals(BigInteger.ZERO)) {
+            return Optional.empty();
+        }
+        BigDecimal sqrtPrice = new BigDecimal(slot0.sqrtPriceX96);
+        BigDecimal numerator = sqrtPrice.multiply(sqrtPrice, PRICE_MATH_CONTEXT);
+        BigDecimal denominator = new BigDecimal(BigInteger.ONE.shiftLeft(192));
+        BigDecimal price = numerator.divide(denominator, 18, RoundingMode.HALF_UP);
+        price = adjustForDecimals(price, metadata.token0Decimals, metadata.token1Decimals)
+                .setScale(18, RoundingMode.HALF_UP);
+        return Optional.of(price);
+    }
+
+    /**
+     * 查询 V3/V4 池子的流动性
+     */
+    private BigDecimal fetchConcentratedLiquidity(PairMetadata metadata) {
+        try {
+            Function function = new Function(
+                    "liquidity",
+                    Collections.emptyList(),
+                    Collections.singletonList(new TypeReference<Uint128>() {
+                    })
+            );
+            String encoded = FunctionEncoder.encode(function);
+            Transaction tx = Transaction.createEthCallTransaction(null, metadata.pairAddress, encoded);
+            EthCall response = web3j.ethCall(tx, resolveBlockParameter(null)).send();
+            if (response.isReverted()) {
+                return null;
+            }
+            List<Type> values = FunctionReturnDecoder.decode(response.getValue(), function.getOutputParameters());
+            if (values.isEmpty()) {
+                return null;
+            }
+            BigInteger raw = ((Uint128) values.get(0)).getValue();
+            return new BigDecimal(raw);
+        } catch (Exception ex) {
+            log.debug("Failed to fetch concentrated liquidity for pool {}", metadata.pairAddress, ex);
+            return null;
+        }
+    }
+
+    /**
+     * 判断价格样本是否过期
+     */
+    private boolean isSampleStale(PriceSample sample, long nowMillis) {
+        if (sample == null) {
+            return true;
+        }
+        return nowMillis - sample.updatedAt > PRICE_SAMPLE_TTL_MILLIS;
+    }
+
+    /**
+     * 选择第一个大于零的权重
+     */
+    private static BigDecimal firstPositive(BigDecimal... values) {
+        if (values == null) {
+            return null;
+        }
+        for (BigDecimal value : values) {
+            if (value != null && value.compareTo(BigDecimal.ZERO) > 0) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 根据区块高度解析默认参数
+     */
+    private DefaultBlockParameter resolveBlockParameter(BigInteger blockNumber) {
+        return blockNumber == null ? DefaultBlockParameterName.LATEST : DefaultBlockParameter.valueOf(blockNumber);
     }
 
     /**
@@ -156,52 +414,84 @@ public class DexPriceService {
      * @return 价格
      */
     private Optional<BigDecimal> getBestPriceForPair(String baseToken, String quoteToken, BigInteger blockNumber) {
-        List<BigDecimal> prices = new ArrayList<>();
+        List<WeightedPrice> weightedPrices = new ArrayList<>();
+        weightedPrices.addAll(collectPricesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken));
+        weightedPrices.addAll(collectPricesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken));
+        weightedPrices.addAll(collectPricesFromPairs(findOrCreateV4Pools(baseToken, quoteToken), baseToken));
 
-        prices.addAll(collectPricesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken, blockNumber));
-        prices.addAll(collectPricesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken, blockNumber));
-        prices.addAll(collectPricesFromPairs(findOrCreateV4Pools(baseToken, quoteToken), baseToken, blockNumber));
-
-        if (prices.isEmpty()) {
+        if (weightedPrices.isEmpty()) {
             return Optional.empty();
         }
 
-        Optional<BigDecimal> average = calculateMedianPrice(prices);
+        Optional<BigDecimal> weightedMedian = calculateWeightedMedianPrice(weightedPrices);
+        if (weightedMedian.isPresent()) {
+            return Optional.of(weightedMedian.get().setScale(18, RoundingMode.HALF_UP));
+        }
 
-        return average;
+        Optional<BigDecimal> weightedAverage = calculateWeightedAveragePrice(weightedPrices);
+        return weightedAverage.map(value -> value.setScale(18, RoundingMode.HALF_UP));
     }
 
     /**
-     * 计算价格中位数
-     * @param prices
-     * @return
+     * 计算加权中位数
      */
-    private Optional<BigDecimal> calculateMedianPrice(List<BigDecimal> prices) {
-        if (prices == null || prices.isEmpty()) {
+    private Optional<BigDecimal> calculateWeightedMedianPrice(List<WeightedPrice> weightedPrices) {
+        if (weightedPrices == null || weightedPrices.isEmpty()) {
             return Optional.empty();
         }
-
-        // 过滤掉 null 或 ≤0 的价格
-        List<BigDecimal> validPrices = prices.stream()
-                .filter(p -> p != null && p.compareTo(BigDecimal.ZERO) > 0)
-                .sorted()
+        List<WeightedPrice> valid = weightedPrices.stream()
+                .filter(w -> w != null && w.getPrice() != null && w.getWeight() != null
+                        && w.getPrice().compareTo(BigDecimal.ZERO) > 0
+                        && w.getWeight().compareTo(BigDecimal.ZERO) > 0)
+                .sorted(Comparator.comparing(WeightedPrice::getPrice))
                 .collect(Collectors.toList());
-
-        if (validPrices.isEmpty()) {
+        if (valid.isEmpty()) {
             return Optional.empty();
         }
-
-        int size = validPrices.size();
-        if (size % 2 == 1) {
-            // 奇数个，直接取中间值
-            return Optional.of(validPrices.get(size / 2));
-        } else {
-            // 偶数个，取中间两个的平均值
-            BigDecimal p1 = validPrices.get(size / 2 - 1);
-            BigDecimal p2 = validPrices.get(size / 2);
-            BigDecimal median = p1.add(p2).divide(BigDecimal.valueOf(2), 18, RoundingMode.HALF_UP);
-            return Optional.of(median);
+        BigDecimal totalWeight = valid.stream()
+                .map(WeightedPrice::getWeight)
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+        if (totalWeight.compareTo(BigDecimal.ZERO) <= 0) {
+            return Optional.empty();
         }
+        BigDecimal cumulative = BigDecimal.ZERO;
+        BigDecimal halfWeight = totalWeight.divide(BigDecimal.valueOf(2), 18, RoundingMode.HALF_UP);
+        for (WeightedPrice weightedPrice : valid) {
+            cumulative = cumulative.add(weightedPrice.getWeight());
+            if (cumulative.compareTo(halfWeight) >= 0) {
+                return Optional.of(weightedPrice.getPrice());
+            }
+        }
+        return Optional.of(valid.get(valid.size() - 1).getPrice());
+    }
+
+    /**
+     * 计算加权平均
+     */
+    private Optional<BigDecimal> calculateWeightedAveragePrice(List<WeightedPrice> weightedPrices) {
+        if (weightedPrices == null || weightedPrices.isEmpty()) {
+            return Optional.empty();
+        }
+        BigDecimal totalWeight = BigDecimal.ZERO;
+        BigDecimal weightedSum = BigDecimal.ZERO;
+        for (WeightedPrice weightedPrice : weightedPrices) {
+            if (weightedPrice == null || weightedPrice.getPrice() == null || weightedPrice.getWeight() == null) {
+                continue;
+            }
+            if (weightedPrice.getPrice().compareTo(BigDecimal.ZERO) <= 0
+                    || weightedPrice.getWeight().compareTo(BigDecimal.ZERO) <= 0) {
+                continue;
+            }
+            weightedSum = weightedSum.add(
+                    weightedPrice.getPrice().multiply(weightedPrice.getWeight(), PRICE_MATH_CONTEXT),
+                    PRICE_MATH_CONTEXT);
+            totalWeight = totalWeight.add(weightedPrice.getWeight());
+        }
+        if (totalWeight.compareTo(BigDecimal.ZERO) <= 0) {
+            return Optional.empty();
+        }
+        BigDecimal average = weightedSum.divide(totalWeight, 18, RoundingMode.HALF_UP);
+        return Optional.of(average);
     }
 
     /**
@@ -209,17 +499,43 @@ public class DexPriceService {
      *
      * @param pairs       池子列表
      * @param baseToken   基础代币
-     * @param blockNumber 区块高度
      * @return 价格列表
      */
-    private List<BigDecimal> collectPricesFromPairs(List<PairMetadata> pairs, String baseToken, BigInteger blockNumber) {
-        if (pairs == null || pairs.isEmpty()) {
+    private List<WeightedPrice> collectPricesFromPairs(List<PairMetadata> pairs, String baseToken) {
+        if (pairs == null || pairs.isEmpty() || baseToken == null) {
             return Collections.emptyList();
         }
-        List<BigDecimal> prices = new ArrayList<>();
+        List<WeightedPrice> prices = new ArrayList<>();
+        long now = System.currentTimeMillis();
         for (PairMetadata metadata : pairs) {
-            Optional<BigDecimal> price = calculatePrice(metadata, baseToken, blockNumber);
-            price.ifPresent(value -> prices.add(value.setScale(18, RoundingMode.HALF_UP)));
+            if (metadata == null || metadata.pairAddress == null) {
+                continue;
+            }
+            String key = normalize(metadata.pairAddress);
+            PriceSample sample = poolPriceCache.get(key);
+            if (isSampleStale(sample, now)) {
+                Optional<PriceSample> refreshed = refreshPriceForPool(metadata);
+                if (refreshed.isPresent()) {
+                    sample = refreshed.get();
+                }
+            }
+            if (sample != null) {
+                Optional<WeightedPrice> weighted = sample.toWeightedPrice(baseToken);
+                if (weighted.isPresent()) {
+                    prices.add(weighted.get());
+                    continue;
+                }
+            }
+            Optional<BigDecimal> fallback = calculatePrice(metadata, baseToken, null);
+            if (fallback.isPresent()) {
+                BigDecimal weight = sample != null
+                        ? firstPositive(sample.tvlInToken0, sample.tvlInToken1, sample.liquidityWeight)
+                        : null;
+                if (weight == null || weight.compareTo(BigDecimal.ZERO) <= 0) {
+                    weight = BigDecimal.ONE;
+                }
+                prices.add(new WeightedPrice(fallback.get().setScale(18, RoundingMode.HALF_UP), weight));
+            }
         }
         return prices;
     }
@@ -280,7 +596,7 @@ public class DexPriceService {
         String data = FunctionEncoder.encode(function);
         Transaction tx = Transaction.createEthCallTransaction(null, pairMetadata.pairAddress, data);
         try {
-            EthCall response = web3j.ethCall(tx, DefaultBlockParameter.valueOf(blockNumber)).send();
+            EthCall response = web3j.ethCall(tx, resolveBlockParameter(blockNumber)).send();
             if (response.isReverted()) {
                 log.warn("getReserves reverted for pair {}", pairMetadata.pairAddress);
                 return Optional.empty();
@@ -459,9 +775,7 @@ public class DexPriceService {
         }
         String data = FunctionEncoder.encode(function);
         Transaction tx = Transaction.createEthCallTransaction(null, contractAddress, data);
-        DefaultBlockParameter blockParameter = blockNumber != null
-                ? DefaultBlockParameter.valueOf(blockNumber)
-                : DefaultBlockParameterName.LATEST;
+        DefaultBlockParameter blockParameter = resolveBlockParameter(blockNumber);
         try {
             EthCall response = web3j.ethCall(tx, blockParameter).send();
             if (response.isReverted()) {
@@ -700,6 +1014,7 @@ public class DexPriceService {
         }
         PairMetadata normalized = metadata.withPoolType(PoolType.V4);
         cachePairMetadata(normalized, true);
+        refreshPriceForPool(normalized);
     }
 
     /**
@@ -1285,6 +1600,97 @@ public class DexPriceService {
             }
             if (metadata.token1.equalsIgnoreCase(baseToken) && priceToken1PerToken0.compareTo(BigDecimal.ZERO) > 0) {
                 return Optional.of(BigDecimal.ONE.divide(priceToken1PerToken0, 18, RoundingMode.HALF_UP));
+            }
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 加权价格结构
+     */
+    private static class WeightedPrice {
+        private final BigDecimal price;
+        private final BigDecimal weight;
+
+        private WeightedPrice(BigDecimal price, BigDecimal weight) {
+            this.price = price;
+            this.weight = weight;
+        }
+
+        public BigDecimal getPrice() {
+            return price;
+        }
+
+        public BigDecimal getWeight() {
+            return weight;
+        }
+    }
+
+    /**
+     * 价格样本
+     */
+    private static class PriceSample {
+        private final PairMetadata metadata;
+        private final BigDecimal priceToken1PerToken0;
+        private final BigDecimal priceToken0PerToken1;
+        private final BigDecimal reserve0;
+        private final BigDecimal reserve1;
+        private final BigDecimal tvlInToken1;
+        private final BigDecimal tvlInToken0;
+        private final BigDecimal liquidityWeight;
+        private final long updatedAt;
+
+        private PriceSample(PairMetadata metadata,
+                             BigDecimal priceToken1PerToken0,
+                             BigDecimal priceToken0PerToken1,
+                             BigDecimal reserve0,
+                             BigDecimal reserve1,
+                             BigDecimal tvlInToken1,
+                             BigDecimal tvlInToken0,
+                             BigDecimal liquidityWeight,
+                             long updatedAt) {
+            this.metadata = metadata;
+            this.priceToken1PerToken0 = priceToken1PerToken0;
+            this.priceToken0PerToken1 = priceToken0PerToken1;
+            this.reserve0 = reserve0;
+            this.reserve1 = reserve1;
+            this.tvlInToken1 = tvlInToken1;
+            this.tvlInToken0 = tvlInToken0;
+            this.liquidityWeight = liquidityWeight;
+            this.updatedAt = updatedAt;
+        }
+
+        private Optional<WeightedPrice> toWeightedPrice(String baseToken) {
+            if (metadata == null || baseToken == null) {
+                return Optional.empty();
+            }
+            if (metadata.token0 != null && metadata.token0.equalsIgnoreCase(baseToken)) {
+                if (priceToken1PerToken0 == null || priceToken1PerToken0.compareTo(BigDecimal.ZERO) <= 0) {
+                    return Optional.empty();
+                }
+                BigDecimal weight = firstPositive(tvlInToken1,
+                        reserve0 != null && priceToken1PerToken0 != null
+                                ? reserve0.multiply(priceToken1PerToken0, PRICE_MATH_CONTEXT)
+                                : null,
+                        liquidityWeight);
+                if (weight == null || weight.compareTo(BigDecimal.ZERO) <= 0) {
+                    weight = BigDecimal.ONE;
+                }
+                return Optional.of(new WeightedPrice(priceToken1PerToken0, weight));
+            }
+            if (metadata.token1 != null && metadata.token1.equalsIgnoreCase(baseToken)) {
+                if (priceToken0PerToken1 == null || priceToken0PerToken1.compareTo(BigDecimal.ZERO) <= 0) {
+                    return Optional.empty();
+                }
+                BigDecimal weight = firstPositive(tvlInToken0,
+                        reserve1 != null && priceToken0PerToken1 != null
+                                ? reserve1.multiply(priceToken0PerToken1, PRICE_MATH_CONTEXT)
+                                : null,
+                        liquidityWeight);
+                if (weight == null || weight.compareTo(BigDecimal.ZERO) <= 0) {
+                    weight = BigDecimal.ONE;
+                }
+                return Optional.of(new WeightedPrice(priceToken0PerToken1, weight));
             }
             return Optional.empty();
         }
