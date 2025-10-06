@@ -32,11 +32,13 @@ import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -72,6 +74,8 @@ public class DexPriceService {
     private final Map<String, Map<String, PairMetadata>> v3PoolCache = new ConcurrentHashMap<>();
     /** 按 token、顺序缓存的 V4 池子信息 */
     private final Map<String, Map<String, PairMetadata>> v4PoolCache = new ConcurrentHashMap<>();
+    /** 池子 TVL 缓存 */
+    private final Map<String, BigDecimal> poolTvlCache = new ConcurrentHashMap<>();
     /** 区块价格缓存 */
     private final Map<BigInteger, BigDecimal> priceCache = new ConcurrentHashMap<>();
     /** 最近一次成功获取的价格 */
@@ -79,6 +83,8 @@ public class DexPriceService {
 
     /** 价格计算精度 */
     private static final MathContext PRICE_MATH_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
+    /** 计算中位数时保留池子的最小 TVL 比例 */
+    private static final BigDecimal MIN_TVL_RATIO_FOR_MEDIAN = new BigDecimal("0.1");
 
     /**
      * 构造函数
@@ -156,11 +162,13 @@ public class DexPriceService {
      * @return 价格
      */
     private Optional<BigDecimal> getBestPriceForPair(String baseToken, String quoteToken, BigInteger blockNumber) {
-        List<BigDecimal> prices = new ArrayList<>();
+        List<PriceSample> samples = new ArrayList<>();
 
-        prices.addAll(collectPricesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken, blockNumber));
-        prices.addAll(collectPricesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken, blockNumber));
-        prices.addAll(collectPricesFromPairs(findOrCreateV4Pools(baseToken, quoteToken), baseToken, blockNumber));
+        samples.addAll(collectPriceSamplesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken, blockNumber));
+        samples.addAll(collectPriceSamplesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken, blockNumber));
+        samples.addAll(collectPriceSamplesFromPairs(findOrCreateV4Pools(baseToken, quoteToken), baseToken, blockNumber));
+
+        List<BigDecimal> prices = filterPricesByTvl(samples);
 
         if (prices.isEmpty()) {
             return Optional.empty();
@@ -212,16 +220,108 @@ public class DexPriceService {
      * @param blockNumber 区块高度
      * @return 价格列表
      */
-    private List<BigDecimal> collectPricesFromPairs(List<PairMetadata> pairs, String baseToken, BigInteger blockNumber) {
+    private List<PriceSample> collectPriceSamplesFromPairs(List<PairMetadata> pairs, String baseToken, BigInteger blockNumber) {
         if (pairs == null || pairs.isEmpty()) {
             return Collections.emptyList();
         }
-        List<BigDecimal> prices = new ArrayList<>();
+        List<PriceSample> prices = new ArrayList<>();
         for (PairMetadata metadata : pairs) {
             Optional<BigDecimal> price = calculatePrice(metadata, baseToken, blockNumber);
-            price.ifPresent(value -> prices.add(value.setScale(18, RoundingMode.HALF_UP)));
+            price.ifPresent(value -> {
+                BigDecimal normalizedPrice = value.setScale(18, RoundingMode.HALF_UP);
+                BigDecimal tvl = resolveCachedTvl(metadata);
+                prices.add(new PriceSample(normalizedPrice, tvl));
+            });
         }
         return prices;
+    }
+
+    /**
+     * 根据 TVL 过滤价格样本
+     *
+     * @param samples 价格样本
+     * @return 过滤后的价格集合
+     */
+    private List<BigDecimal> filterPricesByTvl(List<PriceSample> samples) {
+        if (samples == null || samples.isEmpty()) {
+            return Collections.emptyList();
+        }
+        BigDecimal maxTvl = samples.stream()
+                .map(sample -> sample.tvl)
+                .filter(Objects::nonNull)
+                .filter(tvl -> tvl.compareTo(BigDecimal.ZERO) > 0)
+                .max(Comparator.naturalOrder())
+                .orElse(null);
+
+        List<BigDecimal> filtered = samples.stream()
+                .filter(sample -> sample.price != null && sample.price.compareTo(BigDecimal.ZERO) > 0)
+                .filter(sample -> isTvlAcceptable(sample.tvl, maxTvl))
+                .map(sample -> sample.price)
+                .collect(Collectors.toList());
+
+        if (!filtered.isEmpty()) {
+            return filtered;
+        }
+
+        return samples.stream()
+                .filter(sample -> sample.price != null && sample.price.compareTo(BigDecimal.ZERO) > 0)
+                .map(sample -> sample.price)
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 判断 TVL 是否满足过滤条件
+     *
+     * @param tvl    当前池子 TVL
+     * @param maxTvl 所有池子的最大 TVL
+     * @return 是否满足条件
+     */
+    private boolean isTvlAcceptable(BigDecimal tvl, BigDecimal maxTvl) {
+        if (tvl == null) {
+            return true;
+        }
+        if (tvl.compareTo(BigDecimal.ZERO) <= 0) {
+            return false;
+        }
+        if (maxTvl == null || maxTvl.compareTo(BigDecimal.ZERO) <= 0) {
+            return true;
+        }
+        BigDecimal threshold = maxTvl.multiply(MIN_TVL_RATIO_FOR_MEDIAN);
+        if (threshold.compareTo(BigDecimal.ZERO) <= 0) {
+            return true;
+        }
+        return tvl.compareTo(threshold) >= 0;
+    }
+
+    /**
+     * 获取缓存中的池子 TVL
+     *
+     * @param metadata 池子元数据
+     * @return TVL
+     */
+    private BigDecimal resolveCachedTvl(PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return null;
+        }
+        return poolTvlCache.get(normalize(metadata.pairAddress));
+    }
+
+    /**
+     * 更新池子的 TVL 缓存
+     *
+     * @param poolId 池子地址或 ID
+     * @param tvl    TVL 数值
+     */
+    public void updatePoolTvl(String poolId, BigDecimal tvl) {
+        if (poolId == null) {
+            return;
+        }
+        String normalized = normalize(poolId);
+        if (tvl == null || tvl.compareTo(BigDecimal.ZERO) <= 0) {
+            poolTvlCache.remove(normalized);
+        } else {
+            poolTvlCache.put(normalized, tvl);
+        }
     }
 
     /**
@@ -1168,6 +1268,19 @@ public class DexPriceService {
      */
     private String normalize(String address) {
         return address == null ? null : address.toLowerCase();
+    }
+
+    /**
+     * 价格样本
+     */
+    private static class PriceSample {
+        private final BigDecimal price;
+        private final BigDecimal tvl;
+
+        private PriceSample(BigDecimal price, BigDecimal tvl) {
+            this.price = price;
+            this.tvl = tvl;
+        }
     }
 
     /**

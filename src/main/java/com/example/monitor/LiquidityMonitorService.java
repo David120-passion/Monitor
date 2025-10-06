@@ -432,6 +432,8 @@ public class LiquidityMonitorService {
                 target.initialize(currency0Decimals, currency1Decimals, rawPriceOpt.orElse(null));
                 return target;
             });
+            Optional<TvlInfo> tvlOpt = calculateV4Tvl(effectiveMetadata, state);
+            priceService.updatePoolTvl(effectiveMetadata.poolId, tvlOpt.map(tvl -> tvl.amount).orElse(null));
             if (previous == null && state != null) {
                 String timestampText = formatTimestamp(resolveLogTimestamp(logEntry));
                 String swapName = resolveV4SwapName(effectiveMetadata);
@@ -444,7 +446,7 @@ public class LiquidityMonitorService {
                 String trackedPriceText = trackedPriceOpt.map(this::formatDecimal).orElse("unknown");
                 String amount0Remaining = formatAmount(state.getAmount0());
                 String amount1Remaining = formatAmount(state.getAmount1());
-                String tvlRemaining = formatTvl(calculateV4Tvl(effectiveMetadata, state));
+                String tvlRemaining = formatTvl(tvlOpt);
                 log.info("POOL_INITIALIZED_V4 swap={} name={} fee={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} amount0Remaining={} amount1Remaining={} tvlRemaining={} time={}",
                         swapName,
                         effectiveMetadata.getDisplayName(),
@@ -543,7 +545,9 @@ public class LiquidityMonitorService {
             });
             String amount0Remaining = formatAmount(state != null ? state.getAmount0() : null);
             String amount1Remaining = formatAmount(state != null ? state.getAmount1() : null);
-            String tvlRemaining = formatTvl(calculateV4Tvl(metadata, state));
+            Optional<TvlInfo> tvlOpt = calculateV4Tvl(metadata, state);
+            priceService.updatePoolTvl(metadata.poolId, tvlOpt.map(tvl -> tvl.amount).orElse(null));
+            String tvlRemaining = formatTvl(tvlOpt);
             String timestampText = formatTimestamp(timestamp);
             String swapName = resolveV4SwapName(metadata);
             log.info("{} swap={} name={} sender={} fee={}  amount0Delta={} amount1Delta={} priceRange={}  amount0Remaining={} amount1Remaining={} tvlRemaining={}  time={}",
@@ -763,9 +767,11 @@ public class LiquidityMonitorService {
                 metadata.poolType == DexPriceService.PoolType.V2,
                 metadata.poolType,
                 metadata.fee);
+        Optional<DexPriceService.PoolSnapshot> snapshotOpt = priceService.loadPoolSnapshot(metadata);
+        Optional<TvlInfo> tvlOpt = snapshotOpt.flatMap(snapshot -> calculateTvl(metadata, snapshot));
+        priceService.updatePoolTvl(metadata.pairAddress, tvlOpt.map(tvl -> tvl.amount).orElse(null));
         String normalized = metadata.pairAddress.toLowerCase();
         if (registeredPools.add(normalized)) {
-            Optional<DexPriceService.PoolSnapshot> snapshotOpt = priceService.loadPoolSnapshot(metadata);
             String amount0Text = snapshotOpt.map(snapshot -> snapshot.token0Amount)
                     .map(this::formatDecimal)
                     .orElse("unknown");
@@ -776,7 +782,7 @@ public class LiquidityMonitorService {
                     .flatMap(snapshot -> snapshot.priceForToken(tokenAddress, metadata))
                     .map(this::formatDecimal)
                     .orElse("unknown");
-            String tvlText = formatTvl(snapshotOpt.flatMap(snapshot -> calculateTvl(metadata, snapshot)));
+            String tvlText = formatTvl(tvlOpt);
             String swapName = metadata.getSwapName();
             if (metadata.poolType == DexPriceService.PoolType.V3) {
                 Optional<DexPriceService.PriceRange> priceRangeOpt = snapshotOpt
