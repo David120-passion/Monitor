@@ -282,6 +282,9 @@ public class DexPriceService {
                     .divide(BigDecimal.TEN.pow(pairMetadata.token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
             BigDecimal quoteReserve = reserves.getReserve1()
                     .divide(BigDecimal.TEN.pow(pairMetadata.token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            if (!hasSufficientLiquidity(baseReserve, quoteReserve)) {
+                return Optional.empty();
+            }
             if (baseReserve.compareTo(BigDecimal.ZERO) == 0) {
                 return Optional.empty();
             }
@@ -291,12 +294,27 @@ public class DexPriceService {
                     .divide(BigDecimal.TEN.pow(pairMetadata.token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
             BigDecimal quoteReserve = reserves.getReserve0()
                     .divide(BigDecimal.TEN.pow(pairMetadata.token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            if (!hasSufficientLiquidity(baseReserve, quoteReserve)) {
+                return Optional.empty();
+            }
             if (baseReserve.compareTo(BigDecimal.ZERO) == 0) {
                 return Optional.empty();
             }
             return Optional.of(quoteReserve.divide(baseReserve, 18, RoundingMode.HALF_UP));
         }
         return Optional.empty();
+    }
+
+    /**
+     * 判断池子是否具有足够的流动性
+     *
+     * @param baseReserve  基础代币储备
+     * @param quoteReserve 报价代币储备
+     * @return 是否满足阈值
+     */
+    private boolean hasSufficientLiquidity(BigDecimal baseReserve, BigDecimal quoteReserve) {
+        BigDecimal threshold = new BigDecimal("0.001");
+        return baseReserve.compareTo(threshold) >= 0 && quoteReserve.compareTo(threshold) >= 0;
     }
 
     /**
