@@ -53,8 +53,8 @@ public class LiquidityMonitorService {
     private final String tokenAddress;
     /** 价格服务 */
     private final DexPriceService priceService;
-    /** 转账监控服务 */
-    private final TransferMonitorService transferMonitorService;
+    /** 交易分析服务 */
+    private final TradeAnalysisService tradeAnalysisService;
     /** 已注册的池子集合 */
     private final Set<String> registeredPools = ConcurrentHashMap.newKeySet();
     /** 已订阅 Burn 事件的池子集合 */
@@ -172,11 +172,11 @@ public class LiquidityMonitorService {
      * 构造函数
      */
     public LiquidityMonitorService(Web3j web3j, String tokenAddress, DexPriceService priceService,
-                                   TransferMonitorService transferMonitorService, BigInteger tokenCreationBlock) {
+                                   TradeAnalysisService tradeAnalysisService, BigInteger tokenCreationBlock) {
         this.web3j = web3j;
         this.tokenAddress = tokenAddress.toLowerCase();
         this.priceService = priceService;
-        this.transferMonitorService = transferMonitorService;
+        this.tradeAnalysisService = tradeAnalysisService;
         this.tokenCreationBlock = tokenCreationBlock;
     }
 
@@ -420,13 +420,11 @@ public class LiquidityMonitorService {
                     hooks);
             V4PoolMetadata previous = v4Pools.putIfAbsent(normalizedPoolId, metadata);
             V4PoolMetadata effectiveMetadata = previous != null ? previous : metadata;
-            if (previous == null) {
-                if (metadata.manager != null) {
-                    transferMonitorService.addLiquidityPair(metadata.manager);
-                }
-            }
             BigInteger currency0Decimals = priceService.resolveTokenDecimals(currency0);
             BigInteger currency1Decimals = priceService.resolveTokenDecimals(currency1);
+            if (previous == null) {
+                registerV4PoolForTradeAnalysis(metadata, currency0Decimals, currency1Decimals);
+            }
             Optional<BigDecimal> rawPriceOpt = calculateToken1PerToken0Price(sqrtPriceX96, currency0Decimals, currency1Decimals);
             Optional<BigDecimal> trackedPriceOpt = calculateTargetPriceFromSqrt(sqrtPriceX96, currency0Decimals, currency1Decimals, currency0, currency1);
             V4PoolState state = v4PoolStates.compute(normalizedPoolId, (key, existing) -> {
@@ -510,7 +508,6 @@ public class LiquidityMonitorService {
             if (metadata == null) {
                 return;
             }
-            transferMonitorService.markLiquidityAdjustmentTx(logEntry.getTransactionHash(), logEntry.getBlockNumber());
             List<Type> data = decodeEventData(logEntry.getData(), MODIFY_LIQUIDITY_EVENT_V4);
             if (data.size() < 4) {
                 return;
@@ -519,7 +516,6 @@ public class LiquidityMonitorService {
             int tickLower = ((Int24) data.get(0)).getValue().intValue();
             int tickUpper = ((Int24) data.get(1)).getValue().intValue();
             BigInteger liquidityDelta = ((Int256) data.get(2)).getValue();
-            String salt = org.web3j.utils.Numeric.toHexString(((Bytes32) data.get(3)).getValue());
             int sign = liquidityDelta.signum();
             String action = sign > 0 ? "POOL_ADDED_V4" : (sign < 0 ? "POOL_REMOVED_V4" : "POOL_UPDATED_V4");
             Instant timestamp = resolveLogTimestamp(logEntry);
@@ -626,7 +622,6 @@ public class LiquidityMonitorService {
      */
     private void handleBurnLog(String pairAddress, String token0, String token1, Event event, Log logEntry) {
         try {
-            transferMonitorService.markLiquidityAdjustmentTx(logEntry.getTransactionHash(), logEntry.getBlockNumber());
             DexPriceService.PoolType poolType = event.equals(BURN_EVENT_V2)
                     ? DexPriceService.PoolType.V2
                     : DexPriceService.PoolType.V3;
@@ -650,7 +645,6 @@ public class LiquidityMonitorService {
                         pairAddress, pairName, sender, to, token0, token1, normalized0, normalized1,
                         formatTimestamp(resolveLogTimestamp(logEntry)));
                 if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
-                    transferMonitorService.removeLiquidityPair(pairAddress);
                 }
             } else if (event.equals(BURN_EVENT_V3)) {
                 List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
@@ -678,7 +672,6 @@ public class LiquidityMonitorService {
                         pairAddress, pairName, owner, feeText, priceRange, token0, token1,  burnedLiquidity, normalized0, normalized1,
                         formatTimestamp(resolveLogTimestamp(logEntry)));
                 if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
-                    transferMonitorService.removeLiquidityPair(pairAddress);
                 }
             }
         } catch (Exception ex) {
@@ -697,7 +690,6 @@ public class LiquidityMonitorService {
      */
     private void handleMintLog(String pairAddress, String token0, String token1, Event event, Log logEntry) {
         try {
-            transferMonitorService.markLiquidityAdjustmentTx(logEntry.getTransactionHash(), logEntry.getBlockNumber());
             DexPriceService.PoolType poolType = event.equals(MINT_EVENT_V2)
                     ? DexPriceService.PoolType.V2
                     : DexPriceService.PoolType.V3;
@@ -773,7 +765,6 @@ public class LiquidityMonitorService {
                 metadata.fee);
         String normalized = metadata.pairAddress.toLowerCase();
         if (registeredPools.add(normalized)) {
-            transferMonitorService.addLiquidityPair(metadata.pairAddress);
             Optional<DexPriceService.PoolSnapshot> snapshotOpt = priceService.loadPoolSnapshot(metadata);
             String amount0Text = snapshotOpt.map(snapshot -> snapshot.token0Amount)
                     .map(this::formatDecimal)
@@ -875,6 +866,21 @@ public class LiquidityMonitorService {
                 metadata.fee,
                 metadata.manager,
                 swapName);
+    }
+
+    private void registerV4PoolForTradeAnalysis(V4PoolMetadata metadata,
+                                                    BigInteger decimals0,
+                                                    BigInteger decimals1) {
+        if (metadata == null) {
+            return;
+        }
+        DexPriceService.PairMetadata pairMetadata = buildV4PairMetadata(metadata, decimals0, decimals1, DexPriceService.PoolType.V4);
+        if (pairMetadata != null) {
+            priceService.registerV4Pool(pairMetadata);
+            if (tradeAnalysisService != null) {
+                tradeAnalysisService.registerV4Pool(pairMetadata);
+            }
+        }
     }
 
     /**

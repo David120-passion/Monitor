@@ -25,6 +25,8 @@ public class DexConstants {
     public static final String UNISWAP_V3_FACTORY = "0xdB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7";
     /** Uniswap V4 工厂地址占位 */
     public static final String UNISWAP_V4_FACTORY = "0x28e2ea090877bf75740558f6bfb36a5ffee9e9df";
+    /** Uniswap V4 StateView 合约地址 */
+    public static final String UNISWAP_V4_STATE_VIEW = "0xd13dd3d6e93f276fafc9db9e6bb47c1180aee0c4";
     //正式
     /** WBNB 代币地址 */
     public static final String WBNB_ADDRESS = "0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";

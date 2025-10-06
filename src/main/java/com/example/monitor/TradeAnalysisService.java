@@ -114,6 +114,8 @@ public class TradeAnalysisService {
     private final Set<String> processedTransactions = ConcurrentHashMap.newKeySet();
     /** 代币精度因子 */
     private final BigDecimal decimalFactor;
+    /** 已知的 V4 池子信息 */
+    private final ConcurrentHashMap<String, DexPriceService.PairMetadata> v4Pools = new ConcurrentHashMap<>();
 
     /**
      * 构造函数
@@ -126,6 +128,20 @@ public class TradeAnalysisService {
         this.priceService = priceService;
         int decimals = tokenDecimals == null ? 18 : Math.max(tokenDecimals.intValue(), 0);
         this.decimalFactor = BigDecimal.TEN.pow(decimals);
+    }
+
+    /**
+     * 注册已知的 V4 池子
+     *
+     * @param metadata 池子元数据
+     */
+    public void registerV4Pool(DexPriceService.PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return;
+        }
+        String key = metadata.pairAddress.toLowerCase(Locale.ROOT);
+        v4Pools.putIfAbsent(key, metadata);
+        priceService.registerV4Pool(metadata);
     }
 
     /**

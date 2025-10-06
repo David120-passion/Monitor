@@ -9,6 +9,7 @@ import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Bool;
 import org.web3j.abi.datatypes.Function;
 import org.web3j.abi.datatypes.Type;
+import org.web3j.abi.datatypes.generated.Bytes32;
 import org.web3j.abi.datatypes.generated.Int24;
 import org.web3j.abi.datatypes.generated.Uint112;
 import org.web3j.abi.datatypes.generated.Uint160;
@@ -69,6 +70,8 @@ public class DexPriceService {
     private final Map<String, PairMetadata> pairCacheByAddress = new ConcurrentHashMap<>();
     /** 按 token、顺序与费率缓存的 V3 池子信息 */
     private final Map<String, Map<String, PairMetadata>> v3PoolCache = new ConcurrentHashMap<>();
+    /** 按 token、顺序缓存的 V4 池子信息 */
+    private final Map<String, Map<String, PairMetadata>> v4PoolCache = new ConcurrentHashMap<>();
     /** 区块价格缓存 */
     private final Map<BigInteger, BigDecimal> priceCache = new ConcurrentHashMap<>();
     /** 最近一次成功获取的价格 */
@@ -76,6 +79,8 @@ public class DexPriceService {
 
     /** 价格计算精度 */
     private static final MathContext PRICE_MATH_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
+    /** 参与价格计算的最小 TVL（美元） */
+    private static final BigDecimal MIN_TVL_USD = new BigDecimal("500");
 
     /**
      * 构造函数
@@ -153,19 +158,63 @@ public class DexPriceService {
      * @return 价格
      */
     private Optional<BigDecimal> getBestPriceForPair(String baseToken, String quoteToken, BigInteger blockNumber) {
-        List<BigDecimal> prices = new ArrayList<>();
+        return getBestPriceForPairInternal(baseToken, quoteToken, blockNumber, true, new HashSet<>());
+    }
 
-        prices.addAll(collectPricesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken, blockNumber));
-        prices.addAll(collectPricesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken, blockNumber));
-        prices.addAll(collectPricesFromPairs(findOrCreateV4Pools(baseToken, quoteToken), baseToken, blockNumber));
-
-        if (prices.isEmpty()) {
+    /**
+     * 获取指定 token 对的最佳价格（可选是否启用 TVL 过滤）
+     */
+    private Optional<BigDecimal> getBestPriceForPairInternal(String baseToken,
+                                                            String quoteToken,
+                                                            BigInteger blockNumber,
+                                                            boolean enforceTvlThreshold,
+                                                            Set<String> visitedPairs) {
+        String pairKey = buildPairKey(baseToken, quoteToken);
+        if (!visitedPairs.add(pairKey)) {
             return Optional.empty();
         }
+        try {
+            boolean computeTvl = enforceTvlThreshold;
+            List<PriceObservation> observations = new ArrayList<>();
+            observations.addAll(collectPriceObservationsFromPairs(
+                    findOrCreatePairs(baseToken, quoteToken),
+                    baseToken,
+                    blockNumber,
+                    computeTvl,
+                    visitedPairs));
+            observations.addAll(collectPriceObservationsFromPairs(
+                    findOrCreateV3Pools(baseToken, quoteToken),
+                    baseToken,
+                    blockNumber,
+                    computeTvl,
+                    visitedPairs));
+            observations.addAll(collectPriceObservationsFromPairs(
+                    findOrCreateV4Pools(baseToken, quoteToken),
+                    baseToken,
+                    blockNumber,
+                    computeTvl,
+                    visitedPairs));
 
-        Optional<BigDecimal> average = calculateMedianPrice(prices);
+            if (observations.isEmpty()) {
+                return Optional.empty();
+            }
 
-        return average;
+            List<BigDecimal> filteredPrices = observations.stream()
+                    .filter(obs -> obs != null && obs.price != null && obs.price.compareTo(BigDecimal.ZERO) > 0)
+                    .filter(obs -> !enforceTvlThreshold
+                            || obs.tvlUsd == null
+                            || obs.tvlUsd.compareTo(MIN_TVL_USD) >= 0)
+                    .map(obs -> obs.price.setScale(18, RoundingMode.HALF_UP))
+                    .collect(Collectors.toList());
+
+            if (filteredPrices.isEmpty()) {
+                return Optional.empty();
+            }
+
+            return calculateMedianPrice(filteredPrices);
+        } finally {
+            visitedPairs.remove(pairKey);
+        }
     }
 
     /**
@@ -209,16 +258,20 @@ public class DexPriceService {
      * @param blockNumber 区块高度
      * @return 价格列表
      */
-    private List<BigDecimal> collectPricesFromPairs(List<PairMetadata> pairs, String baseToken, BigInteger blockNumber) {
+    private List<PriceObservation> collectPriceObservationsFromPairs(List<PairMetadata> pairs,
+                                                                    String baseToken,
+                                                                    BigInteger blockNumber,
+                                                                    boolean computeTvl,
+                                                                    Set<String> visitedPairs) {
         if (pairs == null || pairs.isEmpty()) {
             return Collections.emptyList();
         }
-        List<BigDecimal> prices = new ArrayList<>();
+        List<PriceObservation> observations = new ArrayList<>();
         for (PairMetadata metadata : pairs) {
-            Optional<BigDecimal> price = calculatePrice(metadata, baseToken, blockNumber);
-            price.ifPresent(value -> prices.add(value.setScale(18, RoundingMode.HALF_UP)));
+            Optional<PriceObservation> price = calculatePriceObservation(metadata, baseToken, blockNumber, computeTvl, visitedPairs);
+            price.ifPresent(observations::add);
         }
-        return prices;
+        return observations;
     }
 
     /**
@@ -244,14 +297,18 @@ public class DexPriceService {
      * @param blockNumber 区块高度
      * @return 价格
      */
-    private Optional<BigDecimal> calculatePrice(PairMetadata metadata, String baseToken, BigInteger blockNumber) {
+    private Optional<PriceObservation> calculatePriceObservation(PairMetadata metadata,
+                                                                 String baseToken,
+                                                                 BigInteger blockNumber,
+                                                                 boolean computeTvl,
+                                                                 Set<String> visitedPairs) {
         if (metadata == null) {
             return Optional.empty();
         }
-        if (metadata.poolType == PoolType.V3) {
-            return calculateV3Price(metadata, baseToken, blockNumber);
+        if (metadata.poolType == PoolType.V3 || metadata.poolType == PoolType.V4) {
+            return calculateConcentratedPrice(metadata, baseToken, blockNumber, computeTvl, visitedPairs);
         }
-        return calculateV2Price(metadata, baseToken, blockNumber);
+        return calculateV2Price(metadata, baseToken, blockNumber, computeTvl, visitedPairs);
     }
 
     /**
@@ -302,36 +359,50 @@ public class DexPriceService {
      * @param blockNumber  区块高度
      * @return 价格
      */
-    private Optional<BigDecimal> calculateV2Price(PairMetadata pairMetadata, String baseToken, BigInteger blockNumber) {
+    private Optional<PriceObservation> calculateV2Price(PairMetadata pairMetadata,
+                                                        String baseToken,
+                                                        BigInteger blockNumber,
+                                                        boolean computeTvl,
+                                                        Set<String> visitedPairs) {
         Optional<Reserves> reservesOpt = getReserves(pairMetadata, blockNumber);
         if (!reservesOpt.isPresent()) {
             return Optional.empty();
         }
         Reserves reserves = reservesOpt.get();
+        int decimals0 = pairMetadata.token0Decimals != null ? pairMetadata.token0Decimals.intValue() : 18;
+        int decimals1 = pairMetadata.token1Decimals != null ? pairMetadata.token1Decimals.intValue() : 18;
+        BigDecimal token0Amount = reserves.getReserve0()
+                .divide(BigDecimal.TEN.pow(decimals0), 18, RoundingMode.HALF_UP);
+        BigDecimal token1Amount = reserves.getReserve1()
+                .divide(BigDecimal.TEN.pow(decimals1), 18, RoundingMode.HALF_UP);
         if (pairMetadata.token0.equalsIgnoreCase(baseToken)) {
-            BigDecimal baseReserve = reserves.getReserve0()
-                    .divide(BigDecimal.TEN.pow(pairMetadata.token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
-            BigDecimal quoteReserve = reserves.getReserve1()
-                    .divide(BigDecimal.TEN.pow(pairMetadata.token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            BigDecimal baseReserve = token0Amount;
+            BigDecimal quoteReserve = token1Amount;
             if (!hasSufficientLiquidity(baseReserve, quoteReserve)) {
                 return Optional.empty();
             }
             if (baseReserve.compareTo(BigDecimal.ZERO) == 0) {
                 return Optional.empty();
             }
-            return Optional.of(quoteReserve.divide(baseReserve, 18, RoundingMode.HALF_UP));
+            BigDecimal price = quoteReserve.divide(baseReserve, 18, RoundingMode.HALF_UP);
+            BigDecimal tvl = computeTvl
+                    ? calculatePoolTvlUsd(pairMetadata, token0Amount, token1Amount, blockNumber, visitedPairs).orElse(null)
+                    : null;
+            return Optional.of(new PriceObservation(price, tvl));
         } else if (pairMetadata.token1.equalsIgnoreCase(baseToken)) {
-            BigDecimal baseReserve = reserves.getReserve1()
-                    .divide(BigDecimal.TEN.pow(pairMetadata.token1Decimals.intValue()), 18, RoundingMode.HALF_UP);
-            BigDecimal quoteReserve = reserves.getReserve0()
-                    .divide(BigDecimal.TEN.pow(pairMetadata.token0Decimals.intValue()), 18, RoundingMode.HALF_UP);
+            BigDecimal baseReserve = token1Amount;
+            BigDecimal quoteReserve = token0Amount;
             if (!hasSufficientLiquidity(baseReserve, quoteReserve)) {
                 return Optional.empty();
             }
             if (baseReserve.compareTo(BigDecimal.ZERO) == 0) {
                 return Optional.empty();
             }
-            return Optional.of(quoteReserve.divide(baseReserve, 18, RoundingMode.HALF_UP));
+            BigDecimal price = quoteReserve.divide(baseReserve, 18, RoundingMode.HALF_UP);
+            BigDecimal tvl = computeTvl
+                    ? calculatePoolTvlUsd(pairMetadata, token0Amount, token1Amount, blockNumber, visitedPairs).orElse(null)
+                    : null;
+            return Optional.of(new PriceObservation(price, tvl));
         }
         return Optional.empty();
     }
@@ -356,7 +427,11 @@ public class DexPriceService {
      * @param blockNumber  区块高度
      * @return 价格
      */
-    private Optional<BigDecimal> calculateV3Price(PairMetadata pairMetadata, String baseToken, BigInteger blockNumber) {
+    private Optional<PriceObservation> calculateConcentratedPrice(PairMetadata pairMetadata,
+                                                                  String baseToken,
+                                                                  BigInteger blockNumber,
+                                                                  boolean computeTvl,
+                                                                  Set<String> visitedPairs) {
         Optional<Slot0Data> slot0Opt = getSlot0(pairMetadata, blockNumber);
         if (!slot0Opt.isPresent()) {
             return Optional.empty();
@@ -371,14 +446,98 @@ public class DexPriceService {
         BigDecimal priceToken1PerToken0 = numerator.divide(denominator, 18, RoundingMode.HALF_UP);
         priceToken1PerToken0 = adjustForDecimals(priceToken1PerToken0, pairMetadata.token0Decimals, pairMetadata.token1Decimals);
 
+        BigDecimal tvl = null;
+        if (computeTvl && pairMetadata.poolType == PoolType.V3) {
+            Optional<BigDecimal> token0Amount = fetchTokenBalance(pairMetadata.token0, pairMetadata.token0Decimals, pairMetadata.pairAddress);
+            Optional<BigDecimal> token1Amount = fetchTokenBalance(pairMetadata.token1, pairMetadata.token1Decimals, pairMetadata.pairAddress);
+            if (token0Amount.isPresent() && token1Amount.isPresent()) {
+                tvl = calculatePoolTvlUsd(pairMetadata, token0Amount.get(), token1Amount.get(), blockNumber, visitedPairs)
+                        .orElse(null);
+            }
+        }
+
         if (pairMetadata.token0.equalsIgnoreCase(baseToken)) {
-            return Optional.of(priceToken1PerToken0.setScale(18, RoundingMode.HALF_UP));
+            return Optional.of(new PriceObservation(priceToken1PerToken0.setScale(18, RoundingMode.HALF_UP), tvl));
         } else if (pairMetadata.token1.equalsIgnoreCase(baseToken)) {
             if (priceToken1PerToken0.compareTo(BigDecimal.ZERO) == 0) {
                 return Optional.empty();
             }
-            return Optional.of(BigDecimal.ONE.divide(priceToken1PerToken0, 18, RoundingMode.HALF_UP));
+            BigDecimal inverted = BigDecimal.ONE.divide(priceToken1PerToken0, 18, RoundingMode.HALF_UP);
+            return Optional.of(new PriceObservation(inverted, tvl));
         }
+        return Optional.empty();
+    }
+
+    /**
+     * 计算池子的美元 TVL
+     */
+    private Optional<BigDecimal> calculatePoolTvlUsd(PairMetadata metadata,
+                                                     BigDecimal token0Amount,
+                                                     BigDecimal token1Amount,
+                                                     BigInteger blockNumber,
+                                                     Set<String> visitedPairs) {
+        if (metadata == null || token0Amount == null || token1Amount == null) {
+            return Optional.empty();
+        }
+        Optional<BigDecimal> token0UsdPrice = metadata.token0 != null
+                && metadata.token0.equalsIgnoreCase(DexConstants.USDT_ADDRESS)
+                ? Optional.of(BigDecimal.ONE)
+                : resolveUsdPrice(metadata.token0, blockNumber, new HashSet<>(), visitedPairs);
+        Optional<BigDecimal> token1UsdPrice = metadata.token1 != null
+                && metadata.token1.equalsIgnoreCase(DexConstants.USDT_ADDRESS)
+                ? Optional.of(BigDecimal.ONE)
+                : resolveUsdPrice(metadata.token1, blockNumber, new HashSet<>(), visitedPairs);
+
+        BigDecimal value0 = token0UsdPrice
+                .map(price -> token0Amount.multiply(price, PRICE_MATH_CONTEXT))
+                .orElse(BigDecimal.ZERO);
+        BigDecimal value1 = token1UsdPrice
+                .map(price -> token1Amount.multiply(price, PRICE_MATH_CONTEXT))
+                .orElse(BigDecimal.ZERO);
+
+        BigDecimal total = value0.add(value1);
+        if (total.compareTo(BigDecimal.ZERO) <= 0) {
+            return Optional.empty();
+        }
+        return Optional.of(total.setScale(18, RoundingMode.HALF_UP));
+    }
+
+    /**
+     * 解析代币的美元价格
+     */
+    private Optional<BigDecimal> resolveUsdPrice(String token,
+                                                 BigInteger blockNumber,
+                                                 Set<String> visitedTokens,
+                                                 Set<String> visitedPairs) {
+        if (token == null) {
+            return Optional.empty();
+        }
+        String normalized = normalize(token);
+        if (!visitedTokens.add(normalized)) {
+            return Optional.empty();
+        }
+        if (normalized.equals(normalize(DexConstants.USDT_ADDRESS))) {
+            return Optional.of(BigDecimal.ONE);
+        }
+
+        Optional<BigDecimal> direct = getBestPriceForPairInternal(
+                token,
+                DexConstants.USDT_ADDRESS,
+                blockNumber,
+                false,
+                visitedPairs);
+        if (direct.isPresent()) {
+            return direct;
+        }
+
+        Optional<BigDecimal> viaWbnb = combinePrices(
+                getBestPriceForPairInternal(token, DexConstants.WBNB_ADDRESS, blockNumber, false, visitedPairs),
+                getBestPriceForPairInternal(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, blockNumber, false, visitedPairs)
+        );
+        if (viaWbnb.isPresent()) {
+            return viaWbnb;
+        }
+
         return Optional.empty();
     }
 
@@ -390,6 +549,9 @@ public class DexPriceService {
      * @return slot0 数据
      */
     private Optional<Slot0Data> getSlot0(PairMetadata pairMetadata, BigInteger blockNumber) {
+        if (pairMetadata.poolType == PoolType.V4) {
+            return getSlot0ForV4(pairMetadata, blockNumber);
+        }
         Function function = new Function(
                 "slot0",
                 Collections.emptyList(),
@@ -410,12 +572,56 @@ public class DexPriceService {
                         }
                 )
         );
+        return executeSlot0Call(pairMetadata, pairMetadata.pairAddress, function, blockNumber);
+    }
+
+    /**
+     * 查询 V4 池子的 slot0 数据
+     */
+    private Optional<Slot0Data> getSlot0ForV4(PairMetadata pairMetadata, BigInteger blockNumber) {
+        byte[] poolIdBytes = decodePoolId(pairMetadata.pairAddress);
+        if (poolIdBytes == null) {
+            log.warn("Failed to decode poolId for V4 pool {}", pairMetadata.pairAddress);
+            return Optional.empty();
+        }
+        String target = resolveV4Slot0Contract(pairMetadata.factoryAddress);
+        if (target == null) {
+            log.warn("Unsupported V4 manager {} for pool {}", pairMetadata.factoryAddress, pairMetadata.pairAddress);
+            return Optional.empty();
+        }
+        Function function = new Function(
+                "getSlot0",
+                Collections.singletonList(new Bytes32(poolIdBytes)),
+                Arrays.asList(
+                        new TypeReference<Uint160>() {
+                        },
+                        new TypeReference<Int24>() {
+                        },
+                        new TypeReference<Uint24>() {
+                        },
+                        new TypeReference<Uint24>() {
+                        }
+                )
+        );
+        return executeSlot0Call(pairMetadata, target, function, blockNumber);
+    }
+
+    /**
+     * 执行 slot0 查询并解析结果
+     */
+    private Optional<Slot0Data> executeSlot0Call(PairMetadata metadata, String contractAddress, Function function, BigInteger blockNumber) {
+        if (contractAddress == null) {
+            return Optional.empty();
+        }
         String data = FunctionEncoder.encode(function);
-        Transaction tx = Transaction.createEthCallTransaction(null, pairMetadata.pairAddress, data);
+        Transaction tx = Transaction.createEthCallTransaction(null, contractAddress, data);
+        DefaultBlockParameter blockParameter = blockNumber != null
+                ? DefaultBlockParameter.valueOf(blockNumber)
+                : DefaultBlockParameterName.LATEST;
         try {
-            EthCall response = web3j.ethCall(tx, DefaultBlockParameter.valueOf(blockNumber)).send();
+            EthCall response = web3j.ethCall(tx, blockParameter).send();
             if (response.isReverted()) {
-                log.warn("slot0 reverted for pool {}", pairMetadata.pairAddress);
+                log.warn("slot0 reverted for pool {} via contract {}", metadata.pairAddress, contractAddress);
                 return Optional.empty();
             }
             List<Type> values = FunctionReturnDecoder.decode(response.getValue(), function.getOutputParameters());
@@ -426,9 +632,50 @@ public class DexPriceService {
             int tick = ((Int24) values.get(1)).getValue().intValue();
             return Optional.of(new Slot0Data(sqrtPriceX96, tick));
         } catch (IOException e) {
-            log.error("Failed to query slot0 for pool {}", pairMetadata.pairAddress, e);
+            log.error("Failed to query slot0 for pool {} via contract {}", metadata.pairAddress, contractAddress, e);
             return Optional.empty();
         }
+    }
+
+    /**
+     * 将池子 ID 转换为 32 字节数组
+     */
+    private byte[] decodePoolId(String poolId) {
+        if (poolId == null) {
+            return null;
+        }
+        byte[] raw = Numeric.hexStringToByteArray(poolId);
+        if (raw.length == 32) {
+            return raw;
+        }
+        if (raw.length > 32) {
+            byte[] trimmed = new byte[32];
+            System.arraycopy(raw, raw.length - 32, trimmed, 0, 32);
+            return trimmed;
+        }
+        byte[] padded = new byte[32];
+        System.arraycopy(raw, 0, padded, 32 - raw.length, raw.length);
+        return padded;
+    }
+
+    /**
+     * 解析 V4 slot0 查询目标合约
+     */
+    private String resolveV4Slot0Contract(String managerAddress) {
+        if (managerAddress == null) {
+            return null;
+        }
+        String normalizedManager = normalize(managerAddress);
+        if (normalizedManager == null) {
+            return null;
+        }
+        if (normalizedManager.equals(normalize(DexConstants.PANCAKE_V4_FACTORY))) {
+            return normalizedManager;
+        }
+        if (normalizedManager.equals(normalize(DexConstants.UNISWAP_V4_FACTORY))) {
+            return normalize(DexConstants.UNISWAP_V4_STATE_VIEW);
+        }
+        return null;
     }
 
     /**
@@ -590,8 +837,25 @@ public class DexPriceService {
      * @return 池子信息列表
      */
     public List<PairMetadata> findOrCreateV4Pools(String tokenA, String tokenB) {
-        // 目前返回空列表，后续可通过订阅事件或外部数据源填充 V4 池子缓存。
-        return Collections.emptyList();
+        String key = buildPairKey(tokenA, tokenB);
+        Map<String, PairMetadata> cachedByAddress = v4PoolCache.get(key);
+        if (cachedByAddress == null || cachedByAddress.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return new ArrayList<>(cachedByAddress.values());
+    }
+
+    /**
+     * 注册外部已知的 V4 池子元数据
+     *
+     * @param metadata 池子元数据
+     */
+    public void registerV4Pool(PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return;
+        }
+        PairMetadata normalized = metadata.withPoolType(PoolType.V4);
+        cachePairMetadata(normalized, true);
     }
 
     /**
@@ -746,6 +1010,10 @@ public class DexPriceService {
             addV3PoolToCache(metadata.token0, metadata.token1, metadata.fee, metadata);
             addV3PoolToCache(metadata.token1, metadata.token0, metadata.fee, metadata);
         }
+        if (metadata.poolType == PoolType.V4) {
+            addV4PoolToCache(metadata.token0, metadata.token1, metadata);
+            addV4PoolToCache(metadata.token1, metadata.token0, metadata);
+        }
     }
 
     /**
@@ -779,6 +1047,23 @@ public class DexPriceService {
         }
         String key = buildV3PoolKey(tokenA, tokenB, fee);
         v3PoolCache.compute(key, (k, existing) -> {
+            Map<String, PairMetadata> updated = existing == null ? new LinkedHashMap<>() : new LinkedHashMap<>(existing);
+            String normalizedAddress = normalize(metadata.pairAddress);
+            updated.put(normalizedAddress, metadata);
+            return updated;
+        });
+    }
+
+    /**
+     * 将 V4 池子加入缓存
+     *
+     * @param tokenA   代币 A
+     * @param tokenB   代币 B
+     * @param metadata 池子元数据
+     */
+    private void addV4PoolToCache(String tokenA, String tokenB, PairMetadata metadata) {
+        String key = buildPairKey(tokenA, tokenB);
+        v4PoolCache.compute(key, (k, existing) -> {
             Map<String, PairMetadata> updated = existing == null ? new LinkedHashMap<>() : new LinkedHashMap<>(existing);
             String normalizedAddress = normalize(metadata.pairAddress);
             updated.put(normalizedAddress, metadata);
@@ -1158,6 +1443,19 @@ public class DexPriceService {
                 return Optional.of(BigDecimal.ONE.divide(priceToken1PerToken0, 18, RoundingMode.HALF_UP));
             }
             return Optional.empty();
+        }
+    }
+
+    /**
+     * 价格观测值
+     */
+    private static class PriceObservation {
+        private final BigDecimal price;
+        private final BigDecimal tvlUsd;
+
+        private PriceObservation(BigDecimal price, BigDecimal tvlUsd) {
+            this.price = price;
+            this.tvlUsd = tvlUsd;
         }
     }
 
