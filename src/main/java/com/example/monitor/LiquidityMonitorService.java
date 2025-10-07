@@ -83,6 +83,8 @@ public class LiquidityMonitorService {
     private static final ZoneId TARGET_TIME_ZONE = ZoneId.of("Asia/Shanghai");
     /** 日志时间格式 */
     private static final DateTimeFormatter TIME_FORMATTER = DateTimeFormatter.ISO_OFFSET_DATE_TIME;
+    /** Q96 常量 */
+    private static final BigDecimal Q96 = new BigDecimal(BigInteger.ONE.shiftLeft(96));
 
     /** V2 PairCreated 事件 */
     private static final Event PAIR_CREATED_EVENT = new Event("PairCreated",
@@ -1154,15 +1156,19 @@ public class LiquidityMonitorService {
             BigDecimal numerator = liquidity.multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
             BigDecimal denominator = sqrtUpper.multiply(sqrtLower, PRICE_CONTEXT);
             amount0Raw = numerator.divide(denominator, 18, RoundingMode.HALF_UP);
+            amount0Raw = amount0Raw.divide(Q96, 18, RoundingMode.HALF_UP);
             amount1Raw = BigDecimal.ZERO;
         } else if (sqrtCurrent.compareTo(sqrtUpper) >= 0) {
             amount0Raw = BigDecimal.ZERO;
             amount1Raw = liquidity.multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
+            amount1Raw = amount1Raw.divide(Q96, 18, RoundingMode.HALF_UP);
         } else {
             BigDecimal numerator0 = liquidity.multiply(sqrtUpper.subtract(sqrtCurrent, PRICE_CONTEXT), PRICE_CONTEXT);
             BigDecimal denominator0 = sqrtCurrent.multiply(sqrtUpper, PRICE_CONTEXT);
             amount0Raw = numerator0.divide(denominator0, 18, RoundingMode.HALF_UP);
+            amount0Raw = amount0Raw.divide(Q96, 18, RoundingMode.HALF_UP);
             amount1Raw = liquidity.multiply(sqrtCurrent.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
+            amount1Raw = amount1Raw.divide(Q96, 18, RoundingMode.HALF_UP);
         }
         BigDecimal normalized0 = normalizeTokenAmount(amount0Raw, decimals0);
         BigDecimal normalized1 = normalizeTokenAmount(amount1Raw, decimals1);
