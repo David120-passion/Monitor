@@ -9,6 +9,7 @@ import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Event;
 import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Bytes32;
+import org.web3j.abi.datatypes.generated.Int128;
 import org.web3j.abi.datatypes.generated.Int24;
 import org.web3j.abi.datatypes.generated.Int256;
 import org.web3j.abi.datatypes.generated.Uint128;
@@ -23,6 +24,7 @@ import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.Log;
 import org.web3j.protocol.core.methods.response.EthBlock;
 import org.web3j.protocol.core.methods.response.EthLog;
+import org.web3j.utils.Numeric;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -171,6 +173,8 @@ public class LiquidityMonitorService {
                     TypeReference.create(Int24.class),
                     TypeReference.create(Int24.class),
                     TypeReference.create(Int256.class),
+                    TypeReference.create(Int128.class),
+                    TypeReference.create(Int128.class),
                     TypeReference.create(Bytes32.class)
             ));
 
@@ -511,7 +515,7 @@ public class LiquidityMonitorService {
                 return;
             }
             List<Type> data = decodeEventData(logEntry.getData(), MODIFY_LIQUIDITY_EVENT_V4);
-            if (data.size() < 4) {
+            if (data.size() < 6) {
                 return;
             }
             String sender = normalizeAddress(decodeAddress(topics.get(2)));
@@ -527,22 +531,41 @@ public class LiquidityMonitorService {
             String priceRangeText = formatPriceRange(priceRangeOpt);
             V4PoolState existingState = v4PoolStates.get(poolId);
             BigDecimal currentPrice = existingState != null ? existingState.resolvePrice() : null;
-            Optional<LiquidityEstimation> estimationOpt = estimateV4LiquidityDelta(
-                    liquidityDelta,
-                    tickLower,
-                    tickUpper,
-                    decimals0,
-                    decimals1,
-                    currentPrice);
-            BigDecimal amount0Signed = estimationOpt.map(est -> applySign(est.amount0, sign)).orElse(null);
-            BigDecimal amount1Signed = estimationOpt.map(est -> applySign(est.amount1, sign)).orElse(null);
-            String amount0Text = amount0Signed != null ? formatDecimal(amount0Signed) : "unknown";
-            String amount1Text = amount1Signed != null ? formatDecimal(amount1Signed) : "unknown";
+            BigInteger rawAmount0Delta = ((Int128) data.get(3)).getValue();
+            BigInteger rawAmount1Delta = ((Int128) data.get(4)).getValue();
+            Bytes32 saltBytes = (Bytes32) data.get(5);
+            BigDecimal amount0Delta = normalizeTokenAmount(new BigDecimal(rawAmount0Delta), decimals0);
+            BigDecimal amount1Delta = normalizeTokenAmount(new BigDecimal(rawAmount1Delta), decimals1);
+            boolean missingAmount0 = amount0Delta == null;
+            boolean missingAmount1 = amount1Delta == null;
+            boolean bothZero = !missingAmount0 && !missingAmount1
+                    && amount0Delta.compareTo(BigDecimal.ZERO) == 0
+                    && amount1Delta.compareTo(BigDecimal.ZERO) == 0;
+            if (liquidityDelta.signum() != 0 && (missingAmount0 || missingAmount1 || bothZero)) {
+                Optional<LiquidityEstimation> estimationOpt = estimateV4LiquidityDelta(
+                        liquidityDelta,
+                        tickLower,
+                        tickUpper,
+                        decimals0,
+                        decimals1,
+                        currentPrice);
+                if (estimationOpt.isPresent()) {
+                    LiquidityEstimation estimation = estimationOpt.get();
+                    if (missingAmount0 || bothZero) {
+                        amount0Delta = applySign(estimation.amount0, sign);
+                    }
+                    if (missingAmount1 || bothZero) {
+                        amount1Delta = applySign(estimation.amount1, sign);
+                    }
+                }
+            }
+            String amount0Text = amount0Delta != null ? formatDecimal(amount0Delta) : "unknown";
+            String amount1Text = amount1Delta != null ? formatDecimal(amount1Delta) : "unknown";
             V4PoolState state = v4PoolStates.compute(poolId, (key, existing) -> {
                 V4PoolState target = existing != null ? existing : new V4PoolState();
                 target.ensureDecimals(decimals0, decimals1);
-                if (amount0Signed != null || amount1Signed != null) {
-                    target.applyDelta(amount0Signed, amount1Signed);
+                if (amount0Delta != null || amount1Delta != null) {
+                    target.applyDelta(amount0Delta, amount1Delta);
                 }
                 return target;
             });
@@ -552,19 +575,22 @@ public class LiquidityMonitorService {
             String amount1Remaining = formatAmount(state != null ? state.getAmount1() : null);
             String timestampText = formatTimestamp(timestamp);
             String swapName = resolveV4SwapName(metadata);
-            log.info("poolId={} topic={} swap={} name={} sender={} fee={}  amount0Delta={} amount1Delta={} priceRange={}  amount0Remaining={} amount1Remaining={} tvlRemaining={}  time={}",
+            String salt = saltBytes != null ? Numeric.toHexString(saltBytes.getValue()) : "";
+            log.info("poolId={} topic={} swap={} name={} sender={} fee={} liquidityDelta={} amount0Delta={} amount1Delta={} priceRange={}  amount0Remaining={} amount1Remaining={} tvlRemaining={} salt={} time={}",
                     poolId,
                     action,
                     swapName,
                     metadata.getDisplayName(),
                     sender,
                     formatFee(metadata.fee),
+                    liquidityDelta,
                     amount0Text,
                     amount1Text,
                     priceRangeText,
                     amount0Remaining,
                     amount1Remaining,
                     tvlRemaining,
+                    salt,
                     timestampText);
         } catch (Exception ex) {
             log.error("Failed to handle V4 modify liquidity log", ex);
@@ -1760,10 +1786,17 @@ public class LiquidityMonitorService {
      * 格式化十进制数
      */
     private String formatDecimal(BigDecimal value) {
+        if (value == null) {
+            return "unknown";
+        }
         BigDecimal scaled = value.setScale(6, RoundingMode.HALF_UP);
+        if (scaled.compareTo(BigDecimal.ZERO) == 0 && value.compareTo(BigDecimal.ZERO) != 0) {
+            int dynamicScale = Math.min(18, Math.max(6, value.scale() + 6));
+            scaled = value.setScale(dynamicScale, RoundingMode.HALF_UP);
+        }
         BigDecimal normalized = scaled.stripTrailingZeros();
         if (normalized.compareTo(BigDecimal.ZERO) == 0) {
-            return "0";
+            return value.compareTo(BigDecimal.ZERO) == 0 ? "0" : scaled.toPlainString();
         }
         return normalized.toPlainString();
     }
