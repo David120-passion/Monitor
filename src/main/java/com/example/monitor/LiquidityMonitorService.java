@@ -503,18 +503,15 @@ public class LiquidityMonitorService {
     private void handleV4ModifyLiquidityLog(Log logEntry) {
         try {
             List<String> topics = logEntry.getTopics();
-            if (topics.size() < 3) {
-                return;
-            }
+            if (topics.size() < 3) return;
+
             String poolId = normalizePoolId(topics.get(1));
             V4PoolMetadata metadata = v4Pools.get(poolId);
-            if (metadata == null) {
-                return;
-            }
+            if (metadata == null) return;
+
             List<Type> data = decodeEventData(logEntry.getData(), MODIFY_LIQUIDITY_EVENT_V4);
-            if (data.size() < 4) {
-                return;
-            }
+            if (data.size() < 4) return;
+
             String sender = normalizeAddress(decodeAddress(topics.get(2)));
             int tickLower = ((Int24) data.get(0)).getValue().intValue();
             int tickUpper = ((Int24) data.get(1)).getValue().intValue();
@@ -522,15 +519,22 @@ public class LiquidityMonitorService {
             int sign = liquidityDelta.signum();
             String action = sign > 0 ? "POOL_ADDED_V4" : (sign < 0 ? "POOL_REMOVED_V4" : "POOL_UPDATED_V4");
             Instant timestamp = resolveLogTimestamp(logEntry);
+
+            // ✅ 获取代币精度
             BigInteger decimals0 = priceService.resolveTokenDecimals(metadata.currency0);
             BigInteger decimals1 = priceService.resolveTokenDecimals(metadata.currency1);
-            Optional<DexPriceService.PriceRange> priceRangeOpt = calculateV4PriceRange(metadata, decimals0, decimals1, tickLower, tickUpper);
-            String priceRangeText = formatPriceRange(priceRangeOpt);
+
             V4PoolState existingState = v4PoolStates.get(poolId);
             BigDecimal currentPrice = existingState != null ? existingState.resolvePrice() : null;
+
+            // ✅ 计算 tick 区间价格范围
+            Optional<DexPriceService.PriceRange> priceRangeOpt = calculateV4PriceRange(metadata, decimals0, decimals1, tickLower, tickUpper);
+            String priceRangeText = formatPriceRange(priceRangeOpt);
+
             Bytes32 saltBytes = (Bytes32) data.get(3);
-            BigDecimal amount0Delta = null;
-            BigDecimal amount1Delta = null;
+            BigDecimal amount0Delta = BigDecimal.ZERO;
+            BigDecimal amount1Delta = BigDecimal.ZERO;
+
             if (liquidityDelta.signum() != 0) {
                 Optional<LiquidityEstimation> estimationOpt = estimateV4LiquidityDelta(
                         liquidityDelta,
@@ -538,31 +542,41 @@ public class LiquidityMonitorService {
                         tickUpper,
                         decimals0,
                         decimals1,
-                        currentPrice);
+                        currentPrice
+                );
+
                 if (estimationOpt.isPresent()) {
                     LiquidityEstimation estimation = estimationOpt.get();
-                    amount0Delta = applySign(estimation.amount0, sign);
-                    amount1Delta = applySign(estimation.amount1, sign);
+                    amount0Delta = estimation.amount0.multiply(BigDecimal.valueOf(sign));
+                    amount1Delta = estimation.amount1.multiply(BigDecimal.valueOf(sign));
                 }
             }
-            String amount0Text = amount0Delta != null ? formatDecimal(amount0Delta) : "unknown";
-            String amount1Text = amount1Delta != null ? formatDecimal(amount1Delta) : "unknown";
+
+            // ✅ 更新池状态（非累计）
             V4PoolState state = v4PoolStates.compute(poolId, (key, existing) -> {
                 V4PoolState target = existing != null ? existing : new V4PoolState();
                 target.ensureDecimals(decimals0, decimals1);
-                if (amount0Delta != null || amount1Delta != null) {
+                if (amount0Delta.signum() != 0 || amount1Delta.signum() != 0) {
                     target.applyDelta(amount0Delta, amount1Delta);
                 }
                 return target;
             });
+
+            // ✅ 更新 TVL
             updateV4TvlUsdCache(metadata, state);
-            String tvlRemaining = v4PoolTvlUsdCache.get(poolId).toString() +"usd";
+
+            String amount0Text = formatDecimal(amount0Delta);
+            String amount1Text = formatDecimal(amount1Delta);
             String amount0Remaining = formatAmount(state != null ? state.getAmount0() : null);
             String amount1Remaining = formatAmount(state != null ? state.getAmount1() : null);
+            String tvlRemaining = v4PoolTvlUsdCache.get(poolId) + " USD";
             String timestampText = formatTimestamp(timestamp);
             String swapName = resolveV4SwapName(metadata);
             String salt = saltBytes != null ? Numeric.toHexString(saltBytes.getValue()) : "";
-            log.info("poolId={} topic={} swap={} name={} sender={} fee={} liquidityDelta={} amount0Delta={} amount1Delta={} priceRange={}  amount0Remaining={} amount1Remaining={} tvlRemaining={} salt={} time={}",
+
+            log.info("POOL_MODIFY_V4 poolId={} action={} swap={} name={} sender={} fee={} " +
+                            "liquidityDelta={} amount0Delta={} amount1Delta={} priceRange={} " +
+                            "amount0Remaining={} amount1Remaining={} tvlRemaining={} salt={} time={}",
                     poolId,
                     action,
                     swapName,
@@ -579,7 +593,7 @@ public class LiquidityMonitorService {
                     salt,
                     timestampText);
         } catch (Exception ex) {
-            log.error("Failed to handle V4 modify liquidity log", ex);
+            log.error("Failed to handle V4 ModifyLiquidity log", ex);
         }
     }
 
@@ -1153,15 +1167,18 @@ public class LiquidityMonitorService {
      * @param decimals1      货币 1 精度
      * @return 估算结果
      */
-    private Optional<LiquidityEstimation> estimateV4LiquidityDelta(BigInteger liquidityDelta,
-                                                                   int tickLower,
-                                                                   int tickUpper,
-                                                                   BigInteger decimals0,
-                                                                   BigInteger decimals1,
-                                                                   BigDecimal currentPriceToken1PerToken0) {
+    private Optional<LiquidityEstimation> estimateV4LiquidityDelta(
+            BigInteger liquidityDelta,
+            int tickLower,
+            int tickUpper,
+            BigInteger decimals0,
+            BigInteger decimals1,
+            BigDecimal currentPriceToken1PerToken0) {
+
         if (liquidityDelta == null || liquidityDelta.equals(BigInteger.ZERO)) {
             return Optional.empty();
         }
+
         BigDecimal sqrtLower = sqrtRatioAtTick(tickLower);
         BigDecimal sqrtUpper = sqrtRatioAtTick(tickUpper);
         if (sqrtLower == null || sqrtUpper == null
@@ -1169,31 +1186,39 @@ public class LiquidityMonitorService {
                 || sqrtUpper.compareTo(BigDecimal.ZERO) <= 0) {
             return Optional.empty();
         }
-        BigDecimal sqrtCurrent = resolveSqrtCurrent(tickLower, tickUpper, currentPriceToken1PerToken0);
-        BigDecimal liquidity = new BigDecimal(liquidityDelta.abs());
+
+        // ✅ 当前价格平方根
+        BigDecimal sqrtCurrent = sqrtPrice(currentPriceToken1PerToken0);
+        BigDecimal L = new BigDecimal(liquidityDelta.abs());
         BigDecimal amount0Raw;
         BigDecimal amount1Raw;
+
+        // ✅ 判断区间关系
         if (sqrtCurrent.compareTo(sqrtLower) <= 0) {
-            BigDecimal numerator = liquidity.multiply(Q96, PRICE_CONTEXT)
-                    .multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
-            BigDecimal denominator = sqrtUpper.multiply(sqrtLower, PRICE_CONTEXT);
-            amount0Raw = safeDivide(numerator, denominator);
+            // 当前价格低于区间 → 全部为 token0
+            amount0Raw = L.multiply(sqrtUpper.subtract(sqrtLower))
+                    .divide(sqrtUpper.multiply(sqrtLower), PRICE_CONTEXT);
             amount1Raw = BigDecimal.ZERO;
         } else if (sqrtCurrent.compareTo(sqrtUpper) >= 0) {
+            // 当前价格高于区间 → 全部为 token1
             amount0Raw = BigDecimal.ZERO;
-            amount1Raw = liquidity.multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT)
-                    .divide(Q96, 18, RoundingMode.HALF_UP);
+            amount1Raw = L.multiply(sqrtUpper.subtract(sqrtLower));
         } else {
-            BigDecimal numerator0 = liquidity.multiply(Q96, PRICE_CONTEXT)
-                    .multiply(sqrtUpper.subtract(sqrtCurrent, PRICE_CONTEXT), PRICE_CONTEXT);
-            BigDecimal denominator0 = sqrtCurrent.multiply(sqrtUpper, PRICE_CONTEXT);
-            amount0Raw = safeDivide(numerator0, denominator0);
-            amount1Raw = liquidity.multiply(sqrtCurrent.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT)
-                    .divide(Q96, 18, RoundingMode.HALF_UP);
+            // 当前价格在区间内
+            amount0Raw = L.multiply(sqrtUpper.subtract(sqrtCurrent))
+                    .divide(sqrtCurrent.multiply(sqrtUpper), PRICE_CONTEXT);
+            amount1Raw = L.multiply(sqrtCurrent.subtract(sqrtLower));
         }
-        BigDecimal normalized0 = normalizeTokenAmount(amount0Raw, decimals0);
-        BigDecimal normalized1 = normalizeTokenAmount(amount1Raw, decimals1);
-        return Optional.of(new LiquidityEstimation(normalized0, normalized1));
+
+        // ✅ 除以代币精度
+        BigDecimal amount0 = amount0Raw.divide(BigDecimal.TEN.pow(decimals0.intValue()), PRICE_CONTEXT);
+        BigDecimal amount1 = amount1Raw.divide(BigDecimal.TEN.pow(decimals1.intValue()), PRICE_CONTEXT);
+
+        return Optional.of(new LiquidityEstimation(amount0, amount1));
+    }
+
+    private BigDecimal sqrtPrice(BigDecimal priceToken1PerToken0) {
+        return BigDecimal.valueOf(Math.sqrt(priceToken1PerToken0.doubleValue()));
     }
 
     /**
