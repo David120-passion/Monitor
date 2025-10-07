@@ -1147,7 +1147,7 @@ public class DexPriceService {
         String key = buildPairKey(tokenA, tokenB);
         Map<String, PairMetadata> cachedByAddress = pairCacheByTokens.get(key);
         if (cachedByAddress != null && !cachedByAddress.isEmpty()) {
-            return new ArrayList<>(cachedByAddress.values());
+            return cachedByAddress.values().stream().filter(metadata -> metadata.poolType == PoolType.V2).collect(Collectors.toList());
         }
         List<PairMetadata> result = new ArrayList<>();
         return result;
