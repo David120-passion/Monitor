@@ -84,6 +84,8 @@ public class DexPriceService {
     private final AtomicReference<BigDecimal> lastKnownPrice = new AtomicReference<>();
     /** 池子价格样本缓存 */
     private final Map<String, PriceSample> poolPriceCache = new ConcurrentHashMap<>();
+    /** 池子美元 TVL 缓存 */
+    private final Map<String, BigDecimal> poolUsdTvlCache = new ConcurrentHashMap<>();
     /** 价格刷新调度器 */
     private final ScheduledExecutorService priceRefreshExecutor;
 
@@ -91,6 +93,8 @@ public class DexPriceService {
     private static final MathContext PRICE_MATH_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
     /** 价格样本最大存活时间（毫秒） */
     private static final long PRICE_SAMPLE_TTL_MILLIS = 15_000L;
+    /** 池子参与价格计算所需的最小 TVL（美元） */
+    private static final BigDecimal MIN_POOL_TVL_USD = new BigDecimal("500");
 
     /**
      * 构造函数
@@ -605,6 +609,9 @@ public class DexPriceService {
                 }
             }
             if (sample != null) {
+                if (!passesUsdTvlFilter(sample)) {
+                    continue;
+                }
                 Optional<WeightedPrice> weighted = sample.toWeightedPrice(baseToken);
                 if (weighted.isPresent()) {
                     prices.add(weighted.get());
@@ -623,6 +630,60 @@ public class DexPriceService {
             }
         }
         return prices;
+    }
+
+    /**
+     * 更新池子的美元 TVL 缓存
+     */
+    public void updatePoolUsdTvl(PairMetadata metadata, BigDecimal tvlUsd) {
+        if (metadata == null) {
+            return;
+        }
+        updatePoolUsdTvl(metadata.pairAddress, tvlUsd);
+    }
+
+    /**
+     * 使用池子地址更新美元 TVL 缓存
+     */
+    public void updatePoolUsdTvl(String poolAddress, BigDecimal tvlUsd) {
+        String key = normalize(poolAddress);
+        if (key == null) {
+            return;
+        }
+        if (tvlUsd != null && tvlUsd.compareTo(BigDecimal.ZERO) > 0) {
+            poolUsdTvlCache.put(key, tvlUsd);
+        } else {
+            poolUsdTvlCache.remove(key);
+        }
+    }
+
+    /**
+     * 获取缓存的美元 TVL
+     */
+    public Optional<BigDecimal> getCachedPoolUsdTvl(String poolAddress) {
+        String key = normalize(poolAddress);
+        if (key == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(poolUsdTvlCache.get(key));
+    }
+
+    /**
+     * 检查池子的美元 TVL 是否满足阈值
+     */
+    private boolean passesUsdTvlFilter(PriceSample sample) {
+        if (sample == null || sample.metadata == null || sample.metadata.pairAddress == null) {
+            return true;
+        }
+        String key = normalize(sample.metadata.pairAddress);
+        if (key == null) {
+            return true;
+        }
+        BigDecimal cachedTvl = poolUsdTvlCache.get(key);
+        if (cachedTvl == null) {
+            return true;
+        }
+        return cachedTvl.compareTo(MIN_POOL_TVL_USD) >= 0;
     }
 
     /**

@@ -1649,13 +1649,14 @@ public class LiquidityMonitorService {
             return;
         }
         Optional<BigDecimal> tvlUsdOpt = calculateUsdTvlAmount(metadata, snapshot);
+        BigDecimal tvlUsd = tvlUsdOpt.orElse(null);
         if (metadata.poolType == DexPriceService.PoolType.V4) {
             String key = normalizePoolId(metadata.pairAddress);
             if (key == null) {
                 return;
             }
             if (tvlUsdOpt.isPresent()) {
-                v4PoolTvlUsdCache.put(key, tvlUsdOpt.get());
+                v4PoolTvlUsdCache.put(key, tvlUsd);
             } else {
                 v4PoolTvlUsdCache.remove(key);
             }
@@ -1665,11 +1666,12 @@ public class LiquidityMonitorService {
                 return;
             }
             if (tvlUsdOpt.isPresent()) {
-                poolTvlUsdCache.put(key, tvlUsdOpt.get());
+                poolTvlUsdCache.put(key, tvlUsd);
             } else {
                 poolTvlUsdCache.remove(key);
             }
         }
+        priceService.updatePoolUsdTvl(metadata, tvlUsd);
     }
 
     /**
@@ -1690,6 +1692,7 @@ public class LiquidityMonitorService {
                 poolTvlUsdCache.remove(key);
             }
         }
+        priceService.updatePoolUsdTvl(metadata, null);
     }
 
     /**
