@@ -223,18 +223,8 @@ public class TradeAnalysisService {
     /** 价格服务 */
     private final DexPriceService priceService;
 
-    /** 总买入数量 */
-    private BigDecimal totalBuyAmount = BigDecimal.ZERO;
-    /** 总卖出数量 */
-    private BigDecimal totalSellAmount = BigDecimal.ZERO;
-    /** 总买入金额（USD） */
-    private BigDecimal totalBuyValue = BigDecimal.ZERO;
-    /** 总卖出金额（USD） */
-    private BigDecimal totalSellValue = BigDecimal.ZERO;
-    /** 成交统计锁 */
-    private final Object aggregateLock = new Object();
-    /** 成交计数 */
-    private long tradeCounter = 0L;
+    /** 按地址统计的成交数据 */
+    private final ConcurrentHashMap<String, AddressTotals> totalsByAddress = new ConcurrentHashMap<>();
     /** 已处理的交易哈希 */
     private final Set<String> processedTransactions = ConcurrentHashMap.newKeySet();
     /** 代币精度因子 */
@@ -344,7 +334,7 @@ public class TradeAnalysisService {
             BigDecimal price = priceOpt.orElse(BigDecimal.ZERO);
             BigDecimal usdValue = detection.tradeAmount.multiply(price);
 
-            TradeSummary summary = updateTotals(detection.direction, detection.tradeAmount, usdValue);
+            TradeSummary summary = updateTotals(txFromNormalized, detection.direction, detection.tradeAmount, usdValue);
 
             log.info("TRADE address={} action={} amount={} {} price=${} value=${} totalBuyAmount={} totalSellAmount={} " +
                             "totalBuyValue=${} totalSellValue=${} netAmount={} netValue=${} avgBuyPrice=${} avgSellPrice=${} trades={} " +
@@ -626,23 +616,16 @@ public class TradeAnalysisService {
 
 
     /**
-     * 更新统计汇总
-     *
-     * @param direction 交易方向
-     * @param amount    交易数量
-     * @param usdValue  交易价值
-     * @return 汇总结果
+     * 地址级别的成交累计数据
      */
-    private TradeSummary updateTotals(TradeDirection direction, BigDecimal amount, BigDecimal usdValue) {
-        synchronized (aggregateLock) {
-            tradeCounter++;
-            if (direction == TradeDirection.BUY) {
-                totalBuyAmount = totalBuyAmount.add(amount);
-                totalBuyValue = totalBuyValue.add(usdValue);
-            } else {
-                totalSellAmount = totalSellAmount.add(amount);
-                totalSellValue = totalSellValue.add(usdValue);
-            }
+    private static class AddressTotals {
+        private BigDecimal totalBuyAmount = BigDecimal.ZERO;
+        private BigDecimal totalSellAmount = BigDecimal.ZERO;
+        private BigDecimal totalBuyValue = BigDecimal.ZERO;
+        private BigDecimal totalSellValue = BigDecimal.ZERO;
+        private long tradeCount = 0L;
+
+        private TradeSummary toSummary() {
             BigDecimal netAmount = totalBuyAmount.subtract(totalSellAmount);
             BigDecimal netValue = totalBuyValue.subtract(totalSellValue);
             BigDecimal avgBuyPrice = totalBuyAmount.signum() == 0 ? BigDecimal.ZERO :
@@ -650,8 +633,35 @@ public class TradeAnalysisService {
             BigDecimal avgSellPrice = totalSellAmount.signum() == 0 ? BigDecimal.ZERO :
                     totalSellValue.divide(totalSellAmount, 18, RoundingMode.HALF_UP);
             return new TradeSummary(totalBuyAmount, totalSellAmount, totalBuyValue, totalSellValue,
-                    netAmount, netValue, avgBuyPrice, avgSellPrice, tradeCounter);
+                    netAmount, netValue, avgBuyPrice, avgSellPrice, tradeCount);
         }
+    }
+
+
+    /**
+     * 更新统计汇总
+     *
+     * @param address   交易地址
+     * @param direction 交易方向
+     * @param amount    交易数量
+     * @param usdValue  交易价值
+     * @return 汇总结果
+     */
+    private TradeSummary updateTotals(String address, TradeDirection direction, BigDecimal amount, BigDecimal usdValue) {
+        String normalizedAddress = normalizeAddress(address);
+        AddressTotals totals = totalsByAddress.compute(normalizedAddress, (addr, existing) -> {
+            AddressTotals updated = existing == null ? new AddressTotals() : existing;
+            if (direction == TradeDirection.BUY) {
+                updated.totalBuyAmount = updated.totalBuyAmount.add(amount);
+                updated.totalBuyValue = updated.totalBuyValue.add(usdValue);
+            } else {
+                updated.totalSellAmount = updated.totalSellAmount.add(amount);
+                updated.totalSellValue = updated.totalSellValue.add(usdValue);
+            }
+            updated.tradeCount = updated.tradeCount + 1;
+            return updated;
+        });
+        return totals.toSummary();
     }
 
     /**
