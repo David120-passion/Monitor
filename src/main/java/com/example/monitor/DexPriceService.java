@@ -1077,10 +1077,12 @@ public class DexPriceService {
     public List<PairMetadata> findOrCreatePairs(String tokenA, String tokenB) {
         String key = buildPairKey(tokenA, tokenB);
         Map<String, PairMetadata> cachedByAddress = pairCacheByTokens.get(key);
+        if (cachedByAddress != null && !cachedByAddress.isEmpty()) {
+            return new ArrayList<>(cachedByAddress.values());
+        }
         List<PairMetadata> result = new ArrayList<>();
         Set<String> seenAddresses = new HashSet<>();
         if (cachedByAddress != null) {
-            result.addAll(cachedByAddress.values());
             seenAddresses.addAll(cachedByAddress.keySet());
         }
         for (String factory : DexConstants.V2_FACTORIES) {
@@ -1109,9 +1111,12 @@ public class DexPriceService {
         for (BigInteger fee : DexConstants.V3_FEE_TIERS) {
             String key = buildV3PoolKey(tokenA, tokenB, fee);
             Map<String, PairMetadata> cachedByAddress = v3PoolCache.get(key);
+            if (cachedByAddress != null && !cachedByAddress.isEmpty()) {
+                pools.addAll(cachedByAddress.values());
+                continue;
+            }
             Set<String> seenAddresses = new HashSet<>();
             if (cachedByAddress != null) {
-                pools.addAll(cachedByAddress.values());
                 seenAddresses.addAll(cachedByAddress.keySet());
             }
             for (String factory : DexConstants.V3_FACTORIES) {
