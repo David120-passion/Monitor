@@ -1296,6 +1296,19 @@ public class DexPriceService {
     }
 
     /**
+     * 获取缓存中的池子元数据
+     *
+     * @param address 池子地址
+     * @return 元数据
+     */
+    public Optional<PairMetadata> findCachedPairMetadata(String address) {
+        if (address == null) {
+            return Optional.empty();
+        }
+        return Optional.ofNullable(pairCacheByAddress.get(normalize(address)));
+    }
+
+    /**
      * 缓存池子元数据
      *
      * @param metadata      元数据

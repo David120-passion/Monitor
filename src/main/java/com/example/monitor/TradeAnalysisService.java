@@ -27,6 +27,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
@@ -78,7 +79,7 @@ public class TradeAnalysisService {
      *     );
      *
      * */
-    private static final String SWAP_EVENT_SIGNATURE_V2 = EventEncoder.encode(new Event("Swap",
+    private static final Event SWAP_EVENT_V2 = new Event("Swap",
             Arrays.asList(
                     TypeReference.create(Address.class, true),
                     TypeReference.create(Uint256.class),
@@ -86,7 +87,8 @@ public class TradeAnalysisService {
                     TypeReference.create(Uint256.class),
                     TypeReference.create(Uint256.class),
                     TypeReference.create(Address.class, true)
-            )));
+            ));
+    private static final String SWAP_EVENT_SIGNATURE_V2 = EventEncoder.encode(SWAP_EVENT_V2);
 
     /** V3
      *
@@ -116,7 +118,7 @@ public class TradeAnalysisService {
      *
      * */
 
-    private static final String PANCAKE_EVENT_SIGNATURE_V3 = EventEncoder.encode(new Event("Swap",
+    private static final Event PANCAKE_EVENT_V3 = new Event("Swap",
             Arrays.asList(
                     TypeReference.create(Address.class, true),
                     TypeReference.create(Address.class, true),
@@ -127,8 +129,8 @@ public class TradeAnalysisService {
                     TypeReference.create(Int24.class),
                     TypeReference.create(Uint128.class),
                     TypeReference.create(Uint128.class)
-            )));
-    private static final String UNISWAP_EVENT_SIGNATURE_V3 = EventEncoder.encode(new Event("Swap",
+            ));
+    private static final Event UNISWAP_EVENT_V3 = new Event("Swap",
             Arrays.asList(
                     TypeReference.create(Address.class, true),
                     TypeReference.create(Address.class, true),
@@ -137,7 +139,9 @@ public class TradeAnalysisService {
                     TypeReference.create(Uint160.class),
                     TypeReference.create(Uint128.class),
                     TypeReference.create(Int24.class)
-            )));
+            ));
+    private static final String PANCAKE_EVENT_SIGNATURE_V3 = EventEncoder.encode(PANCAKE_EVENT_V3);
+    private static final String UNISWAP_EVENT_SIGNATURE_V3 = EventEncoder.encode(UNISWAP_EVENT_V3);
     /**
      * V4 Swap 事件签名
      * pancakeSwap
@@ -164,7 +168,7 @@ public class TradeAnalysisService {
      *         uint24 fee
      *     );
      */
-    private static final String PANCAKESWAP_EVENT_SIGNATURE_V4 = EventEncoder.encode(new Event("Swap",
+    private static final Event PANCAKESWAP_EVENT_V4 = new Event("Swap",
             Arrays.asList(
                     TypeReference.create(Bytes32.class, true),
                     TypeReference.create(Address.class, true),
@@ -175,8 +179,8 @@ public class TradeAnalysisService {
                     TypeReference.create(Int24.class),
                     TypeReference.create(Uint24.class),
                     TypeReference.create(Uint16.class)
-            )));
-    private static final String UNISWAP_EVENT_SIGNATURE_V4 = EventEncoder.encode(new Event("Swap",
+            ));
+    private static final Event UNISWAP_EVENT_V4 = new Event("Swap",
             Arrays.asList(
                     TypeReference.create(Bytes32.class, true),
                     TypeReference.create(Address.class, true),
@@ -186,16 +190,24 @@ public class TradeAnalysisService {
                     TypeReference.create(Uint128.class),
                     TypeReference.create(Int24.class),
                     TypeReference.create(Int24.class)
-            )));
+            ));
+    private static final String PANCAKESWAP_EVENT_SIGNATURE_V4 = EventEncoder.encode(PANCAKESWAP_EVENT_V4);
+    private static final String UNISWAP_EVENT_SIGNATURE_V4 = EventEncoder.encode(UNISWAP_EVENT_V4);
 
+
+    private static final String SWAP_EVENT_SIGNATURE_V2_NORMALIZED = SWAP_EVENT_SIGNATURE_V2.toLowerCase(Locale.ROOT);
+    private static final String UNISWAP_EVENT_SIGNATURE_V3_NORMALIZED = UNISWAP_EVENT_SIGNATURE_V3.toLowerCase(Locale.ROOT);
+    private static final String PANCAKE_EVENT_SIGNATURE_V3_NORMALIZED = PANCAKE_EVENT_SIGNATURE_V3.toLowerCase(Locale.ROOT);
+    private static final String UNISWAP_EVENT_SIGNATURE_V4_NORMALIZED = UNISWAP_EVENT_SIGNATURE_V4.toLowerCase(Locale.ROOT);
+    private static final String PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED = PANCAKESWAP_EVENT_SIGNATURE_V4.toLowerCase(Locale.ROOT);
 
     /** 支持的 Swap 事件签名集合 */
     private static final Set<String> SUPPORTED_SWAP_SIGNATURES = new HashSet<>(Arrays.asList(
-            SWAP_EVENT_SIGNATURE_V2.toLowerCase(Locale.ROOT),
-            UNISWAP_EVENT_SIGNATURE_V3.toLowerCase(Locale.ROOT),
-            PANCAKE_EVENT_SIGNATURE_V3.toLowerCase(Locale.ROOT),
-            UNISWAP_EVENT_SIGNATURE_V4.toLowerCase(Locale.ROOT),
-            PANCAKESWAP_EVENT_SIGNATURE_V4.toLowerCase(Locale.ROOT)
+            SWAP_EVENT_SIGNATURE_V2_NORMALIZED,
+            UNISWAP_EVENT_SIGNATURE_V3_NORMALIZED,
+            PANCAKE_EVENT_SIGNATURE_V3_NORMALIZED,
+            UNISWAP_EVENT_SIGNATURE_V4_NORMALIZED,
+            PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED
     ));
 
     public static void main(String[] args) {
@@ -367,13 +379,17 @@ public class TradeAnalysisService {
      * @param logs             交易所有日志
      * @return 交易识别结果
      */
-    private Optional<TradeDetection> analyseTransactionLogs(String txFromNormalized, List<Log> logs,String txHash) {
+    private Optional<TradeDetection> analyseTransactionLogs(String txFromNormalized, List<Log> logs, String txHash) {
         if (logs == null || logs.isEmpty()) {
             return Optional.empty();
         }
-        BigInteger totalInRaw = BigInteger.ZERO;
-        BigInteger totalOutRaw = BigInteger.ZERO;
-        boolean swapDetected = false;
+        BigInteger swapInRaw = BigInteger.ZERO;
+        BigInteger swapOutRaw = BigInteger.ZERO;
+        boolean swapMatched = false;
+        boolean swapSignatureDetected = false;
+
+        BigInteger transferInRaw = BigInteger.ZERO;
+        BigInteger transferOutRaw = BigInteger.ZERO;
 
         for (Log entry : logs) {
             List<String> topics = entry.getTopics();
@@ -382,7 +398,14 @@ public class TradeAnalysisService {
             }
             String topic0 = topics.get(0).toLowerCase(Locale.ROOT);
             if (SUPPORTED_SWAP_SIGNATURES.contains(topic0)) {
-                swapDetected = true;
+                swapSignatureDetected = true;
+                Optional<TokenFlow> flowOpt = analyseSwapLog(topic0, entry, topics);
+                if (flowOpt.isPresent()) {
+                    swapMatched = true;
+                    TokenFlow flow = flowOpt.get();
+                    swapInRaw = swapInRaw.add(flow.received);
+                    swapOutRaw = swapOutRaw.add(flow.sent);
+                }
             }
 
             if (!tokenAddress.equalsIgnoreCase(entry.getAddress())) {
@@ -403,21 +426,31 @@ public class TradeAnalysisService {
 
             BigInteger value = (BigInteger) decoded.get(0).getValue();
             if (txFromNormalized.equals(normalizeAddress(from))) {
-                totalOutRaw = totalOutRaw.add(value);
+                transferOutRaw = transferOutRaw.add(value);
             }
             if (txFromNormalized.equals(normalizeAddress(to))) {
-                totalInRaw = totalInRaw.add(value);
+                transferInRaw = transferInRaw.add(value);
             }
         }
 
-        if (!swapDetected) {
+        if (swapMatched) {
+            return buildTradeDetection(swapInRaw, swapOutRaw, txHash);
+        }
+        if (!swapSignatureDetected) {
             return Optional.empty();
         }
+        if (transferInRaw.signum() == 0 && transferOutRaw.signum() == 0) {
+            log.info("Zero trade amounts detected in tx {}", txHash);
+            return Optional.empty();
+        }
+        return buildTradeDetection(transferInRaw, transferOutRaw, txHash);
+    }
 
+    private Optional<TradeDetection> buildTradeDetection(BigInteger totalInRaw, BigInteger totalOutRaw, String txHash) {
         BigDecimal totalIn = toDecimalAmount(totalInRaw);
         BigDecimal totalOut = toDecimalAmount(totalOutRaw);
         if (totalIn.signum() == 0 && totalOut.signum() == 0) {
-            log.info("Zero trade amounts detected in tx {}",txHash);
+            log.info("Zero trade amounts detected in tx {}", txHash);
             return Optional.empty();
         }
 
@@ -432,7 +465,7 @@ public class TradeAnalysisService {
         } else {
             BigDecimal net = totalIn.subtract(totalOut);
             if (net.signum() == 0) {
-                log.info("net in tx {}",txHash);
+                log.info("net in tx {}", txHash);
                 return Optional.empty();
             }
             direction = net.signum() > 0 ? TradeDirection.BUY : TradeDirection.SELL;
@@ -441,6 +474,156 @@ public class TradeAnalysisService {
 
         return Optional.of(new TradeDetection(direction, tradeAmount, totalIn, totalOut));
     }
+
+    private Optional<TokenFlow> analyseSwapLog(String topic0, Log entry, List<String> topics) {
+        Optional<DexPriceService.PairMetadata> metadataOpt = resolveSwapPairMetadata(topic0, entry, topics);
+        if (!metadataOpt.isPresent()) {
+            return Optional.empty();
+        }
+        DexPriceService.PairMetadata metadata = metadataOpt.get();
+        String token0 = normalizeAddress(metadata.token0);
+        String token1 = normalizeAddress(metadata.token1);
+        boolean trackToken0 = tokenAddress.equalsIgnoreCase(token0);
+        boolean trackToken1 = tokenAddress.equalsIgnoreCase(token1);
+        if (!trackToken0 && !trackToken1) {
+            return Optional.empty();
+        }
+
+        BigInteger traderDelta;
+        if (SWAP_EVENT_SIGNATURE_V2_NORMALIZED.equals(topic0)) {
+            List<Type> decoded = decodeEventData(entry.getData(), SWAP_EVENT_V2.getNonIndexedParameters());
+            if (decoded.size() < 4) {
+                return Optional.empty();
+            }
+            BigInteger amount0In = ((Uint256) decoded.get(0)).getValue();
+            BigInteger amount1In = ((Uint256) decoded.get(1)).getValue();
+            BigInteger amount0Out = ((Uint256) decoded.get(2)).getValue();
+            BigInteger amount1Out = ((Uint256) decoded.get(3)).getValue();
+            traderDelta = trackToken0
+                    ? amount0Out.subtract(amount0In)
+                    : amount1Out.subtract(amount1In);
+        } else if (PANCAKE_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0) || UNISWAP_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0)) {
+            List<TypeReference<Type>> parameters = PANCAKE_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0)
+                    ? PANCAKE_EVENT_V3.getNonIndexedParameters()
+                    : UNISWAP_EVENT_V3.getNonIndexedParameters();
+            List<Type> decoded = decodeEventData(entry.getData(), parameters);
+            if (decoded.size() < 2) {
+                return Optional.empty();
+            }
+            BigInteger amount0 = ((Int256) decoded.get(0)).getValue();
+            BigInteger amount1 = ((Int256) decoded.get(1)).getValue();
+            BigInteger poolDelta = trackToken0 ? amount0 : amount1;
+            traderDelta = poolDelta.negate();
+        } else if (PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0) || UNISWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0)) {
+            List<TypeReference<Type>> parameters = PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0)
+                    ? PANCAKESWAP_EVENT_V4.getNonIndexedParameters()
+                    : UNISWAP_EVENT_V4.getNonIndexedParameters();
+            List<Type> decoded = decodeEventData(entry.getData(), parameters);
+            if (decoded.size() < 2) {
+                return Optional.empty();
+            }
+            BigInteger amount0 = ((Int128) decoded.get(0)).getValue();
+            BigInteger amount1 = ((Int128) decoded.get(1)).getValue();
+            BigInteger poolDelta = trackToken0 ? amount0 : amount1;
+            traderDelta = poolDelta.negate();
+        } else {
+            return Optional.empty();
+        }
+
+        BigInteger received = traderDelta.signum() > 0 ? traderDelta : BigInteger.ZERO;
+        BigInteger sent = traderDelta.signum() < 0 ? traderDelta.negate() : BigInteger.ZERO;
+        if (received.signum() == 0 && sent.signum() == 0) {
+            return Optional.empty();
+        }
+        return Optional.of(new TokenFlow(received, sent));
+    }
+
+    private Optional<DexPriceService.PairMetadata> resolveSwapPairMetadata(String topic0, Log entry, List<String> topics) {
+        if (SWAP_EVENT_SIGNATURE_V2_NORMALIZED.equals(topic0)) {
+            String address = entry.getAddress();
+            if (address == null || address.isEmpty()) {
+                return Optional.empty();
+            }
+            return fetchPairMetadata(address, DexPriceService.PoolType.V2);
+        }
+        if (PANCAKE_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0) || UNISWAP_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0)) {
+            String address = entry.getAddress();
+            if (address == null || address.isEmpty()) {
+                return Optional.empty();
+            }
+            return fetchPairMetadata(address, DexPriceService.PoolType.V3);
+        }
+        if (PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0) || UNISWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0)) {
+            if (topics.size() < 2) {
+                return Optional.empty();
+            }
+            String poolId = normalizePoolId(topics.get(1));
+            if (poolId == null || poolId.isEmpty()) {
+                return Optional.empty();
+            }
+            DexPriceService.PairMetadata metadata = v4Pools.get(poolId.toLowerCase(Locale.ROOT));
+            if (metadata != null) {
+                return Optional.of(metadata);
+            }
+            return priceService.findCachedPairMetadata(poolId);
+        }
+        return Optional.empty();
+    }
+
+    private Optional<DexPriceService.PairMetadata> fetchPairMetadata(String address, DexPriceService.PoolType poolType) {
+        if (address == null || address.isEmpty()) {
+            return Optional.empty();
+        }
+        String normalized = normalizeAddress(address);
+        if (normalized.isEmpty()) {
+            return Optional.empty();
+        }
+        Optional<DexPriceService.PairMetadata> cached = priceService.findCachedPairMetadata(normalized);
+        if (cached.isPresent()) {
+            return cached;
+        }
+        if (poolType == DexPriceService.PoolType.V2) {
+            return priceService.loadPairMetadata(normalized);
+        }
+        return priceService.loadPairMetadata(normalized, false, poolType);
+    }
+
+    private List<Type> decodeEventData(String data, List<TypeReference<Type>> parameters) {
+        if (data == null || data.length() < 2) {
+            return Collections.emptyList();
+        }
+        try {
+            return FunctionReturnDecoder.decode(data, parameters);
+        } catch (Exception ex) {
+            log.debug("Failed to decode swap event data", ex);
+            return Collections.emptyList();
+        }
+    }
+
+    private String normalizePoolId(String poolId) {
+        if (poolId == null) {
+            return null;
+        }
+        String clean = poolId.toLowerCase(Locale.ROOT);
+        if (!clean.startsWith("0x")) {
+            clean = "0x" + clean;
+        }
+        return clean;
+    }
+
+    /**
+     * 记录 Swap 中目标代币的流向
+     */
+    private static class TokenFlow {
+        private final BigInteger received;
+        private final BigInteger sent;
+
+        private TokenFlow(BigInteger received, BigInteger sent) {
+            this.received = received;
+            this.sent = sent;
+        }
+    }
+
 
     /**
      * 更新统计汇总
