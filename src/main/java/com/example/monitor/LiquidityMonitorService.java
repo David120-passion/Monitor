@@ -65,6 +65,10 @@ public class LiquidityMonitorService {
     private final ConcurrentHashMap<String, V4PoolMetadata> v4Pools = new ConcurrentHashMap<>();
     /** V4 池子实时状态 */
     private final ConcurrentHashMap<String, V4PoolState> v4PoolStates = new ConcurrentHashMap<>();
+    /** V2/V3 池子 TVL（美元）缓存 */
+    private final ConcurrentHashMap<String, BigDecimal> poolTvlUsdCache = new ConcurrentHashMap<>();
+    /** V4 池子 TVL（美元）缓存 */
+    private final ConcurrentHashMap<String, BigDecimal> v4PoolTvlUsdCache = new ConcurrentHashMap<>();
     /** 已订阅 V4 ModifyLiquidity 事件的池子集合 */
     private final Set<String> v4SubscribedPools = ConcurrentHashMap.newKeySet();
     /** 区块时间缓存 */
@@ -432,6 +436,7 @@ public class LiquidityMonitorService {
                 target.initialize(currency0Decimals, currency1Decimals, rawPriceOpt.orElse(null));
                 return target;
             });
+            updateV4TvlUsdCache(effectiveMetadata, state);
             if (previous == null && state != null) {
                 String timestampText = formatTimestamp(resolveLogTimestamp(logEntry));
                 String swapName = resolveV4SwapName(effectiveMetadata);
@@ -541,6 +546,7 @@ public class LiquidityMonitorService {
                 }
                 return target;
             });
+            updateV4TvlUsdCache(metadata, state);
             String amount0Remaining = formatAmount(state != null ? state.getAmount0() : null);
             String amount1Remaining = formatAmount(state != null ? state.getAmount1() : null);
             String tvlRemaining = formatTvl(calculateV4Tvl(metadata, state));
@@ -674,6 +680,7 @@ public class LiquidityMonitorService {
                 if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
                 }
             }
+            metadataOpt.ifPresent(this::refreshTvlCacheForPair);
         } catch (Exception ex) {
             log.error("Failed to handle burn log", ex);
         }
@@ -738,6 +745,7 @@ public class LiquidityMonitorService {
                         pairAddress, pairName, sender, owner, feeText, priceRange, token0, token1,  normalized0, normalized1,
                         formatTimestamp(resolveLogTimestamp(logEntry)));
             }
+            metadataOpt.ifPresent(this::refreshTvlCacheForPair);
         } catch (Exception ex) {
             log.error("Failed to handle mint log", ex);
         }
@@ -766,6 +774,7 @@ public class LiquidityMonitorService {
         String normalized = metadata.pairAddress.toLowerCase();
         if (registeredPools.add(normalized)) {
             Optional<DexPriceService.PoolSnapshot> snapshotOpt = priceService.loadPoolSnapshot(metadata);
+            snapshotOpt.ifPresent(snapshot -> cacheUsdTvl(metadata, snapshot));
             String amount0Text = snapshotOpt.map(snapshot -> snapshot.token0Amount)
                     .map(this::formatDecimal)
                     .orElse("unknown");
@@ -1554,6 +1563,124 @@ public class LiquidityMonitorService {
         }
 
         return Optional.of(new TvlInfo(tvlAmount.setScale(18, RoundingMode.HALF_UP), symbol));
+    }
+
+    /**
+     * 计算池子的美元 TVL
+     */
+    private Optional<BigDecimal> calculateUsdTvlAmount(DexPriceService.PairMetadata metadata,
+                                                       DexPriceService.PoolSnapshot snapshot) {
+        if (metadata == null || snapshot == null) {
+            return Optional.empty();
+        }
+        BigDecimal total = BigDecimal.ZERO;
+        boolean hasValue = false;
+        if (snapshot.token0Amount != null) {
+            Optional<BigDecimal> price0Opt = priceService.getCachedPriceInUsdt(metadata.token0);
+            if (price0Opt.isPresent()) {
+                total = total.add(snapshot.token0Amount.multiply(price0Opt.get(), PRICE_CONTEXT), PRICE_CONTEXT);
+                hasValue = true;
+            }
+        }
+        if (snapshot.token1Amount != null) {
+            Optional<BigDecimal> price1Opt = priceService.getCachedPriceInUsdt(metadata.token1);
+            if (price1Opt.isPresent()) {
+                total = total.add(snapshot.token1Amount.multiply(price1Opt.get(), PRICE_CONTEXT), PRICE_CONTEXT);
+                hasValue = true;
+            }
+        }
+        if (!hasValue) {
+            return Optional.empty();
+        }
+        return Optional.of(total.setScale(18, RoundingMode.HALF_UP));
+    }
+
+    /**
+     * 刷新并缓存池子的美元 TVL
+     */
+    private void refreshTvlCacheForPair(DexPriceService.PairMetadata metadata) {
+        if (metadata == null) {
+            return;
+        }
+        Optional<DexPriceService.PoolSnapshot> snapshotOpt = priceService.loadPoolSnapshot(metadata);
+        if (snapshotOpt.isPresent()) {
+            cacheUsdTvl(metadata, snapshotOpt.get());
+        } else {
+            clearTvlCache(metadata);
+        }
+    }
+
+    /**
+     * 更新 V4 池子的美元 TVL 缓存
+     */
+    private void updateV4TvlUsdCache(V4PoolMetadata metadata, V4PoolState state) {
+        if (metadata == null || state == null) {
+            return;
+        }
+        BigInteger decimals0 = state.getDecimals0();
+        if (decimals0 == null) {
+            decimals0 = priceService.resolveTokenDecimals(metadata.currency0);
+        }
+        BigInteger decimals1 = state.getDecimals1();
+        if (decimals1 == null) {
+            decimals1 = priceService.resolveTokenDecimals(metadata.currency1);
+        }
+        DexPriceService.PairMetadata pairMetadata = buildV4PairMetadata(metadata, decimals0, decimals1, DexPriceService.PoolType.V4);
+        if (pairMetadata == null) {
+            return;
+        }
+        cacheUsdTvl(pairMetadata, state.toSnapshot());
+    }
+
+    /**
+     * 将 TVL 写入对应缓存
+     */
+    private void cacheUsdTvl(DexPriceService.PairMetadata metadata, DexPriceService.PoolSnapshot snapshot) {
+        if (metadata == null) {
+            return;
+        }
+        Optional<BigDecimal> tvlUsdOpt = calculateUsdTvlAmount(metadata, snapshot);
+        if (metadata.poolType == DexPriceService.PoolType.V4) {
+            String key = normalizePoolId(metadata.pairAddress);
+            if (key == null) {
+                return;
+            }
+            if (tvlUsdOpt.isPresent()) {
+                v4PoolTvlUsdCache.put(key, tvlUsdOpt.get());
+            } else {
+                v4PoolTvlUsdCache.remove(key);
+            }
+        } else {
+            String key = normalizeAddress(metadata.pairAddress);
+            if (key == null) {
+                return;
+            }
+            if (tvlUsdOpt.isPresent()) {
+                poolTvlUsdCache.put(key, tvlUsdOpt.get());
+            } else {
+                poolTvlUsdCache.remove(key);
+            }
+        }
+    }
+
+    /**
+     * 清除指定池子的 TVL 缓存
+     */
+    private void clearTvlCache(DexPriceService.PairMetadata metadata) {
+        if (metadata == null) {
+            return;
+        }
+        if (metadata.poolType == DexPriceService.PoolType.V4) {
+            String key = normalizePoolId(metadata.pairAddress);
+            if (key != null) {
+                v4PoolTvlUsdCache.remove(key);
+            }
+        } else {
+            String key = normalizeAddress(metadata.pairAddress);
+            if (key != null) {
+                poolTvlUsdCache.remove(key);
+            }
+        }
     }
 
     /**

@@ -392,6 +392,36 @@ public class DexPriceService {
     }
 
     /**
+     * 获取指定代币的美元价格（基于缓存）
+     *
+     * @param tokenAddress 代币地址
+     * @return 价格（USDT）
+     */
+    public Optional<BigDecimal> getCachedPriceInUsdt(String tokenAddress) {
+        if (tokenAddress == null) {
+            return Optional.empty();
+        }
+        if (tokenAddress.equalsIgnoreCase(DexConstants.USDT_ADDRESS)) {
+            return Optional.of(BigDecimal.ONE);
+        }
+
+        Optional<BigDecimal> direct = getBestPriceForPair(tokenAddress, DexConstants.USDT_ADDRESS, null);
+        if (direct.isPresent()) {
+            return Optional.of(direct.get().setScale(18, RoundingMode.HALF_UP));
+        }
+
+        Optional<BigDecimal> viaWbnb = combinePrices(
+                getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, null),
+                getBestPriceForPair(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, null)
+        );
+        if (viaWbnb.isPresent()) {
+            return Optional.of(viaWbnb.get().setScale(18, RoundingMode.HALF_UP));
+        }
+
+        return Optional.empty();
+    }
+
+    /**
      * 缓存并规范化价格
      *
      * @param blockNumber 区块高度
