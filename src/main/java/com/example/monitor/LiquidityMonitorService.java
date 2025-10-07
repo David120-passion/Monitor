@@ -436,7 +436,6 @@ public class LiquidityMonitorService {
                 target.initialize(currency0Decimals, currency1Decimals, rawPriceOpt.orElse(null));
                 return target;
             });
-            updateV4TvlUsdCache(effectiveMetadata, state);
             if (previous == null && state != null) {
                 String timestampText = formatTimestamp(resolveLogTimestamp(logEntry));
                 String swapName = resolveV4SwapName(effectiveMetadata);
@@ -447,17 +446,14 @@ public class LiquidityMonitorService {
                         .map(this::formatDecimal)
                         .orElse("unknown");
                 String trackedPriceText = trackedPriceOpt.map(this::formatDecimal).orElse("unknown");
-                String amount0Remaining = formatAmount(state.getAmount0());
-                String amount1Remaining = formatAmount(state.getAmount1());
-                log.info("POOL_INITIALIZED_V4 swap={} name={} fee={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} amount0Remaining={} amount1Remaining={}  time={}",
+                log.info("poolId = {} topic = POOL_INITIALIZED_V4 swap={} name={} fee={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={}  time={}",
+                        poolIdTopic,
                         swapName,
                         effectiveMetadata.getDisplayName(),
                         formatFee(fee),
                         rawPriceText,
                         inversePriceText,
                         trackedPriceText,
-                        amount0Remaining,
-                        amount1Remaining,
                         timestampText);
             }
             subscribeV4ModifyLiquidity(factoryAddress, poolIdTopic);
@@ -498,7 +494,8 @@ public class LiquidityMonitorService {
     /**
      * 处理 V4 ModifyLiquidity 日志
      *
-     * @param logEntry 日志
+     * @param logEntry 日志  想算v4的tvl 要么还得监听上 swap事件 把代币数量本地维护  如果能根据liquidity算出代币数量就好了
+     *                 如果我只拿当前活跃区间的liquidity去计算tvl  那么会不会不准确
      */
     private void handleV4ModifyLiquidityLog(Log logEntry) {
         try {
@@ -531,11 +528,6 @@ public class LiquidityMonitorService {
             BigDecimal amount1Signed = estimationOpt.map(est -> applySign(est.amount1, sign)).orElse(null);
             String amount0Text = amount0Signed != null ? formatDecimal(amount0Signed) : "unknown";
             String amount1Text = amount1Signed != null ? formatDecimal(amount1Signed) : "unknown";
-            String averagePriceText = priceRangeOpt
-                    .map(range -> range.lower.add(range.upper, PRICE_CONTEXT)
-                            .divide(BigDecimal.valueOf(2), 18, RoundingMode.HALF_UP))
-                    .map(this::formatDecimal)
-                    .orElse("unknown");
             V4PoolState state = v4PoolStates.compute(poolId, (key, existing) -> {
                 V4PoolState target = existing != null ? existing : new V4PoolState();
                 target.ensureDecimals(decimals0, decimals1);
@@ -545,12 +537,13 @@ public class LiquidityMonitorService {
                 return target;
             });
             updateV4TvlUsdCache(metadata, state);
+            String tvlRemaining = v4PoolTvlUsdCache.get(poolId).toString() +"usd";
             String amount0Remaining = formatAmount(state != null ? state.getAmount0() : null);
             String amount1Remaining = formatAmount(state != null ? state.getAmount1() : null);
-            String tvlRemaining = formatTvl(calculateV4Tvl(metadata, state));
             String timestampText = formatTimestamp(timestamp);
             String swapName = resolveV4SwapName(metadata);
-            log.info("{} swap={} name={} sender={} fee={}  amount0Delta={} amount1Delta={} priceRange={}  amount0Remaining={} amount1Remaining={} tvlRemaining={}  time={}",
+            log.info("poolId={} topic={} swap={} name={} sender={} fee={}  amount0Delta={} amount1Delta={} priceRange={}  amount0Remaining={} amount1Remaining={} tvlRemaining={}  time={}",
+                    poolId,
                     action,
                     swapName,
                     metadata.getDisplayName(),
@@ -779,11 +772,8 @@ public class LiquidityMonitorService {
             String amount1Text = snapshotOpt.map(snapshot -> snapshot.token1Amount)
                     .map(this::formatDecimal)
                     .orElse("unknown");
-            String priceText = snapshotOpt
-                    .flatMap(snapshot -> snapshot.priceForToken(tokenAddress, metadata))
-                    .map(this::formatDecimal)
-                    .orElse("unknown");
-            String tvlText = formatTvl(snapshotOpt.flatMap(snapshot -> calculateTvl(metadata, snapshot)));
+
+            String tvlText = poolTvlUsdCache.get(normalized).toString() +"USD";
             String swapName = metadata.getSwapName();
             if (metadata.poolType == DexPriceService.PoolType.V3) {
                 Optional<DexPriceService.PriceRange> priceRangeOpt = snapshotOpt
@@ -793,24 +783,22 @@ public class LiquidityMonitorService {
                                 snapshot.currentTick + snapshot.tickSpacing))
                         .orElse(Optional.empty());
                 String priceRangeText = formatPriceRange(priceRangeOpt);
-                log.info("POOL_REGISTERED pair={} swap={} name={} fee={} amount0={} amount1={} price={} priceRange={}  tvl={}",
+                log.info("POOL_REGISTERED pair={} swap={} name={} fee={} amount0={} amount1={} priceRange={}  tvl={}",
                         metadata.pairAddress,
                         swapName,
                         metadata.getDisplayName(),
                         formatFee(metadata.fee),
                         amount0Text,
                         amount1Text,
-                        priceText,
                         priceRangeText,
                         tvlText);
             } else {
-                log.info("POOL_REGISTERED pair={} swap={} name={} amount0={} amount1={} price={} tvl={}",
+                log.info("POOL_REGISTERED pair={} swap={} name={} amount0={} amount1={} tvl={}",
                         metadata.pairAddress,
                         swapName,
                         metadata.getDisplayName(),
                         amount0Text,
                         amount1Text,
-                        priceText,
                         tvlText);
             }
         }

@@ -25,7 +25,7 @@ public class BscTokenMonitor {
      * @throws InterruptedException 中断异常
      */
     public static void main(String[] args) throws InterruptedException {
-        String tokenAddress = "0x302dfaf2cdbe51a18d97186a7384e87cf599877d";
+        String tokenAddress = "0x76e9b54b49739837be8ad10c3687fc6b543de852";
         Web3j web3j = Web3j.build(new HttpService(DEFAULT_RPC_ENDPOINT));
         TokenInfoService tokenInfoService = new TokenInfoService(web3j);
         BigInteger decimals = tokenInfoService.loadDecimals(tokenAddress).orElse(BigInteger.valueOf(18));
@@ -42,10 +42,14 @@ public class BscTokenMonitor {
         TradeAnalysisService tradeAnalysisService = new TradeAnalysisService(web3j, tokenAddress, decimals, symbol, priceService);
         LiquidityMonitorService liquidityMonitorService = new LiquidityMonitorService(web3j, tokenAddress, priceService,
                 tradeAnalysisService, creationBlockOpt.orElse(null));
-        log.info("v2 v3开始初始化");
         liquidityMonitorService.registerInitialPairs();
+        log.info("v2 v3池子初始化完成");
         liquidityMonitorService.start();
+        log.info("流动性监控服务已启动");
         tradeAnalysisService.start();
+        log.info("交易分析服务已启动");
+        priceService.initializePriceSampler();
+        log.info("价格采样器已初始化");
 
         log.info("Monitor started. Press Ctrl+C to exit.");
         CountDownLatch latch = new CountDownLatch(1);

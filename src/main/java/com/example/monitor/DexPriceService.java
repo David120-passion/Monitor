@@ -118,13 +118,12 @@ public class DexPriceService {
                 return thread;
             }
         });
-        initializePriceSampler();
     }
 
     /**
      * 初始化价格采样器，预加载常用池子并启动后台刷新任务
      */
-    private void initializePriceSampler() {
+    public void initializePriceSampler() {
         try {
             refreshInitialPools();
         } catch (Exception ex) {
