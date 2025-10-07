@@ -8,11 +8,7 @@ import org.web3j.abi.TypeReference;
 import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Event;
 import org.web3j.abi.datatypes.Type;
-import org.web3j.abi.datatypes.generated.Int24;
-import org.web3j.abi.datatypes.generated.Int256;
-import org.web3j.abi.datatypes.generated.Uint128;
-import org.web3j.abi.datatypes.generated.Uint256;
-import org.web3j.abi.datatypes.generated.Uint160;
+import org.web3j.abi.datatypes.generated.*;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
 import org.web3j.protocol.core.DefaultBlockParameterName;
@@ -60,7 +56,28 @@ public class TradeAnalysisService {
     private static final String TRANSFER_EVENT_SIGNATURE = EventEncoder.encode(TRANSFER_EVENT)
             .toLowerCase(Locale.ROOT);
 
-    /** V2 Swap 事件签名 */
+    /** V2 Swap 事件签名
+     *     pancakeSwap
+     *     event Swap(
+     *         address indexed sender,
+     *         uint amount0In,
+     *         uint amount1In,
+     *         uint amount0Out,
+     *         uint amount1Out,
+     *         address indexed to
+     *     );
+     *
+     * uniswap
+     *     event Swap(
+     *         address indexed sender,
+     *         uint amount0In,
+     *         uint amount1In,
+     *         uint amount0Out,
+     *         uint amount1Out,
+     *         address indexed to
+     *     );
+     *
+     * */
     private static final String SWAP_EVENT_SIGNATURE_V2 = EventEncoder.encode(new Event("Swap",
             Arrays.asList(
                     TypeReference.create(Address.class, true),
@@ -71,8 +88,47 @@ public class TradeAnalysisService {
                     TypeReference.create(Address.class, true)
             )));
 
-    /** V3 Swap 事件签名 */
-    private static final String SWAP_EVENT_SIGNATURE_V3 = EventEncoder.encode(new Event("Swap",
+    /** V3
+     *
+     * pankcakeSwap 事件签名
+     *     event Swap(
+     *         address indexed sender,
+     *         address indexed recipient,
+     *         int256 amount0,
+     *         int256 amount1,
+     *         uint160 sqrtPriceX96,
+     *         uint128 liquidity,
+     *         int24 tick,
+     *         uint128 protocolFeesToken0,
+     *         uint128 protocolFeesToken1
+     *     );
+     *
+     *     uniswapSwap 事件签名
+     *       event Swap(
+     *         address indexed sender,
+     *         address indexed recipient,
+     *         int256 amount0,
+     *         int256 amount1,
+     *         uint160 sqrtPriceX96,
+     *         uint128 liquidity,
+     *         int24 tick
+     *     );
+     *
+     * */
+
+    private static final String PANCAKE_EVENT_SIGNATURE_V3 = EventEncoder.encode(new Event("Swap",
+            Arrays.asList(
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Int256.class),
+                    TypeReference.create(Int256.class),
+                    TypeReference.create(Uint160.class),
+                    TypeReference.create(Uint128.class),
+                    TypeReference.create(Int24.class),
+                    TypeReference.create(Uint128.class),
+                    TypeReference.create(Uint128.class)
+            )));
+    private static final String UNISWAP_EVENT_SIGNATURE_V3 = EventEncoder.encode(new Event("Swap",
             Arrays.asList(
                     TypeReference.create(Address.class, true),
                     TypeReference.create(Address.class, true),
@@ -82,12 +138,69 @@ public class TradeAnalysisService {
                     TypeReference.create(Uint128.class),
                     TypeReference.create(Int24.class)
             )));
+    /**
+     * V4 Swap 事件签名
+     * pancakeSwap
+     *     event Swap(
+     *         PoolId indexed id,
+     *         address indexed sender,
+     *         int128 amount0,
+     *         int128 amount1,
+     *         uint160 sqrtPriceX96,
+     *         uint128 liquidity,
+     *         int24 tick,
+     *         uint24 fee,
+     *         uint16 protocolFee
+     *     );
+        * uniswap
+     *    event Swap(
+     *         PoolId indexed id,
+     *         address indexed sender,
+     *         int128 amount0,
+     *         int128 amount1,
+     *         uint160 sqrtPriceX96,
+     *         uint128 liquidity,
+     *         int24 tick,
+     *         uint24 fee
+     *     );
+     */
+    private static final String PANCAKESWAP_EVENT_SIGNATURE_V4 = EventEncoder.encode(new Event("Swap",
+            Arrays.asList(
+                    TypeReference.create(Bytes32.class, true),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Int128.class),
+                    TypeReference.create(Int128.class),
+                    TypeReference.create(Uint160.class),
+                    TypeReference.create(Uint128.class),
+                    TypeReference.create(Int24.class),
+                    TypeReference.create(Uint24.class),
+                    TypeReference.create(Uint16.class)
+            )));
+    private static final String UNISWAP_EVENT_SIGNATURE_V4 = EventEncoder.encode(new Event("Swap",
+            Arrays.asList(
+                    TypeReference.create(Bytes32.class, true),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Int128.class),
+                    TypeReference.create(Int128.class),
+                    TypeReference.create(Uint160.class),
+                    TypeReference.create(Uint128.class),
+                    TypeReference.create(Int24.class),
+                    TypeReference.create(Int24.class)
+            )));
+
 
     /** 支持的 Swap 事件签名集合 */
     private static final Set<String> SUPPORTED_SWAP_SIGNATURES = new HashSet<>(Arrays.asList(
             SWAP_EVENT_SIGNATURE_V2.toLowerCase(Locale.ROOT),
-            SWAP_EVENT_SIGNATURE_V3.toLowerCase(Locale.ROOT)
+            UNISWAP_EVENT_SIGNATURE_V3.toLowerCase(Locale.ROOT),
+            PANCAKE_EVENT_SIGNATURE_V3.toLowerCase(Locale.ROOT),
+            UNISWAP_EVENT_SIGNATURE_V4.toLowerCase(Locale.ROOT),
+            PANCAKESWAP_EVENT_SIGNATURE_V4.toLowerCase(Locale.ROOT)
     ));
+
+    public static void main(String[] args) {
+        SUPPORTED_SWAP_SIGNATURES.forEach(item -> System.out.println(item));
+    }
 
     /** Web3j 客户端 */
     private final Web3j web3j;
@@ -200,7 +313,7 @@ public class TradeAnalysisService {
                 return;
             }
 
-            Optional<TradeDetection> detectionOpt = analyseTransactionLogs(txFromNormalized, receipt.getLogs());
+            Optional<TradeDetection> detectionOpt = analyseTransactionLogs(txFromNormalized, receipt.getLogs(),txHash);
             if (!detectionOpt.isPresent()) {
                 return;
             }
@@ -223,7 +336,7 @@ public class TradeAnalysisService {
 
             log.info("TRADE address={} action={} amount={} {} price=${} value=${} totalBuyAmount={} totalSellAmount={} " +
                             "totalBuyValue=${} totalSellValue=${} netAmount={} netValue=${} avgBuyPrice=${} avgSellPrice=${} trades={} " +
-                            "grossIn={} grossOut={} block={} time={} txHash={}",
+                            " block={} time={} txHash={}",
                     txFrom,
                     detection.direction.getDisplay(),
                     detection.tradeAmount.setScale(6, RoundingMode.HALF_UP),
@@ -239,8 +352,6 @@ public class TradeAnalysisService {
                     summary.avgBuyPrice.setScale(8, RoundingMode.HALF_UP),
                     summary.avgSellPrice.setScale(8, RoundingMode.HALF_UP),
                     summary.tradeCount,
-                    detection.totalIn.setScale(6, RoundingMode.HALF_UP),
-                    detection.totalOut.setScale(6, RoundingMode.HALF_UP),
                     blockNumber,
                     Instant.ofEpochMilli(timestamp).atZone(TARGET_ZONE).format(TIME_FORMATTER),
                     txHash);
@@ -256,7 +367,7 @@ public class TradeAnalysisService {
      * @param logs             交易所有日志
      * @return 交易识别结果
      */
-    private Optional<TradeDetection> analyseTransactionLogs(String txFromNormalized, List<Log> logs) {
+    private Optional<TradeDetection> analyseTransactionLogs(String txFromNormalized, List<Log> logs,String txHash) {
         if (logs == null || logs.isEmpty()) {
             return Optional.empty();
         }
@@ -289,6 +400,7 @@ public class TradeAnalysisService {
             if (decoded.isEmpty()) {
                 continue;
             }
+
             BigInteger value = (BigInteger) decoded.get(0).getValue();
             if (txFromNormalized.equals(normalizeAddress(from))) {
                 totalOutRaw = totalOutRaw.add(value);
@@ -305,6 +417,7 @@ public class TradeAnalysisService {
         BigDecimal totalIn = toDecimalAmount(totalInRaw);
         BigDecimal totalOut = toDecimalAmount(totalOutRaw);
         if (totalIn.signum() == 0 && totalOut.signum() == 0) {
+            log.info("Zero trade amounts detected in tx {}",txHash);
             return Optional.empty();
         }
 
@@ -319,6 +432,7 @@ public class TradeAnalysisService {
         } else {
             BigDecimal net = totalIn.subtract(totalOut);
             if (net.signum() == 0) {
+                log.info("net in tx {}",txHash);
                 return Optional.empty();
             }
             direction = net.signum() > 0 ? TradeDirection.BUY : TradeDirection.SELL;

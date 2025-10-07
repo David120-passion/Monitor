@@ -167,6 +167,7 @@ public class DexPriceService {
         priceRefreshExecutor.scheduleAtFixedRate(() -> {
             try {
                 refreshAllKnownPools();
+                log.info("刷新价格样本完成");
             } catch (Exception ex) {
                 log.error("Failed to refresh pool prices", ex);
             }
@@ -380,7 +381,7 @@ public class DexPriceService {
 
         Optional<BigDecimal> viaWbnb = combinePrices(
                 getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, blockNumber),
-                getBestPriceForPair(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, blockNumber)
+                getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, blockNumber)
         );
         if (viaWbnb.isPresent()) {
             return Optional.of(storePrice(blockNumber, viaWbnb.get()));
