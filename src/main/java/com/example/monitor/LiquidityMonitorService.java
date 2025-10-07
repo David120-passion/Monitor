@@ -79,6 +79,8 @@ public class LiquidityMonitorService {
     private static final BigInteger MAX_LOG_BLOCK_RANGE = BigInteger.valueOf(50_000L);
     /** 价格计算精度 */
     private static final MathContext PRICE_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
+    /** Q96 固定点常量 */
+    private static final BigDecimal Q96 = new BigDecimal(BigInteger.ONE.shiftLeft(96));
     /** 日志时间时区 */
     private static final ZoneId TARGET_TIME_ZONE = ZoneId.of("Asia/Shanghai");
     /** 日志时间格式 */
@@ -1160,18 +1162,22 @@ public class LiquidityMonitorService {
         BigDecimal amount0Raw;
         BigDecimal amount1Raw;
         if (sqrtCurrent.compareTo(sqrtLower) <= 0) {
-            BigDecimal numerator = liquidity.multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
+            BigDecimal numerator = liquidity.multiply(Q96, PRICE_CONTEXT)
+                    .multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
             BigDecimal denominator = sqrtUpper.multiply(sqrtLower, PRICE_CONTEXT);
-            amount0Raw = numerator.divide(denominator, 18, RoundingMode.HALF_UP);
+            amount0Raw = safeDivide(numerator, denominator);
             amount1Raw = BigDecimal.ZERO;
         } else if (sqrtCurrent.compareTo(sqrtUpper) >= 0) {
             amount0Raw = BigDecimal.ZERO;
-            amount1Raw = liquidity.multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
+            amount1Raw = liquidity.multiply(sqrtUpper.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT)
+                    .divide(Q96, 18, RoundingMode.HALF_UP);
         } else {
-            BigDecimal numerator0 = liquidity.multiply(sqrtUpper.subtract(sqrtCurrent, PRICE_CONTEXT), PRICE_CONTEXT);
+            BigDecimal numerator0 = liquidity.multiply(Q96, PRICE_CONTEXT)
+                    .multiply(sqrtUpper.subtract(sqrtCurrent, PRICE_CONTEXT), PRICE_CONTEXT);
             BigDecimal denominator0 = sqrtCurrent.multiply(sqrtUpper, PRICE_CONTEXT);
-            amount0Raw = numerator0.divide(denominator0, 18, RoundingMode.HALF_UP);
-            amount1Raw = liquidity.multiply(sqrtCurrent.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT);
+            amount0Raw = safeDivide(numerator0, denominator0);
+            amount1Raw = liquidity.multiply(sqrtCurrent.subtract(sqrtLower, PRICE_CONTEXT), PRICE_CONTEXT)
+                    .divide(Q96, 18, RoundingMode.HALF_UP);
         }
         BigDecimal normalized0 = normalizeTokenAmount(amount0Raw, decimals0);
         BigDecimal normalized1 = normalizeTokenAmount(amount1Raw, decimals1);
@@ -1184,7 +1190,7 @@ public class LiquidityMonitorService {
     private BigDecimal resolveSqrtCurrent(int tickLower, int tickUpper, BigDecimal currentPriceToken1PerToken0) {
         BigDecimal sqrtFromPrice = sqrtDecimal(currentPriceToken1PerToken0);
         if (sqrtFromPrice != null) {
-            return sqrtFromPrice;
+            return sqrtFromPrice.multiply(Q96, PRICE_CONTEXT);
         }
         return sqrtRatioAtTick((tickLower + tickUpper) / 2);
     }
@@ -1326,7 +1332,17 @@ public class LiquidityMonitorService {
     private BigDecimal sqrtRatioAtTick(int tick) {
         double exponent = tick / 2.0d;
         double value = Math.pow(1.0001d, exponent);
-        return new BigDecimal(Double.toString(value), PRICE_CONTEXT);
+        return new BigDecimal(Double.toString(value), PRICE_CONTEXT).multiply(Q96, PRICE_CONTEXT);
+    }
+
+    private BigDecimal safeDivide(BigDecimal numerator, BigDecimal denominator) {
+        if (numerator == null || denominator == null) {
+            return BigDecimal.ZERO;
+        }
+        if (denominator.compareTo(BigDecimal.ZERO) == 0) {
+            return BigDecimal.ZERO;
+        }
+        return numerator.divide(denominator, 18, RoundingMode.HALF_UP);
     }
 
     /**
