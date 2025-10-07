@@ -552,12 +552,15 @@ public class LiquidityMonitorService {
                 }
             }
 
+            final BigDecimal finalAmount0Delta = amount0Delta;
+            final BigDecimal finalAmount1Delta = amount1Delta;
+
             // ✅ 更新池状态（非累计）
             V4PoolState state = v4PoolStates.compute(poolId, (key, existing) -> {
                 V4PoolState target = existing != null ? existing : new V4PoolState();
                 target.ensureDecimals(decimals0, decimals1);
-                if (amount0Delta.signum() != 0 || amount1Delta.signum() != 0) {
-                    target.applyDelta(amount0Delta, amount1Delta);
+                if (finalAmount0Delta.signum() != 0 || finalAmount1Delta.signum() != 0) {
+                    target.applyDelta(finalAmount0Delta, finalAmount1Delta);
                 }
                 return target;
             });
@@ -565,8 +568,8 @@ public class LiquidityMonitorService {
             // ✅ 更新 TVL
             updateV4TvlUsdCache(metadata, state);
 
-            String amount0Text = formatDecimal(amount0Delta);
-            String amount1Text = formatDecimal(amount1Delta);
+            String amount0Text = formatDecimal(finalAmount0Delta);
+            String amount1Text = formatDecimal(finalAmount1Delta);
             String amount0Remaining = formatAmount(state != null ? state.getAmount0() : null);
             String amount1Remaining = formatAmount(state != null ? state.getAmount1() : null);
             String tvlRemaining = v4PoolTvlUsdCache.get(poolId) + " USD";
