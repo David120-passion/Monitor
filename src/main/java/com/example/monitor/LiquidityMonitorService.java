@@ -449,8 +449,7 @@ public class LiquidityMonitorService {
                 String trackedPriceText = trackedPriceOpt.map(this::formatDecimal).orElse("unknown");
                 String amount0Remaining = formatAmount(state.getAmount0());
                 String amount1Remaining = formatAmount(state.getAmount1());
-                String tvlRemaining = formatTvl(calculateV4Tvl(effectiveMetadata, state));
-                log.info("POOL_INITIALIZED_V4 swap={} name={} fee={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} amount0Remaining={} amount1Remaining={} tvlRemaining={} time={}",
+                log.info("POOL_INITIALIZED_V4 swap={} name={} fee={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={} amount0Remaining={} amount1Remaining={}  time={}",
                         swapName,
                         effectiveMetadata.getDisplayName(),
                         formatFee(fee),
@@ -459,7 +458,6 @@ public class LiquidityMonitorService {
                         trackedPriceText,
                         amount0Remaining,
                         amount1Remaining,
-                        tvlRemaining,
                         timestampText);
             }
             subscribeV4ModifyLiquidity(factoryAddress, poolIdTopic);
@@ -1576,14 +1574,25 @@ public class LiquidityMonitorService {
         BigDecimal total = BigDecimal.ZERO;
         boolean hasValue = false;
         if (snapshot.token0Amount != null) {
-            Optional<BigDecimal> price0Opt = priceService.getCachedPriceInUsdt(metadata.token0);
+            Optional<BigDecimal> price0Opt;
+            if(tokenAddress.equalsIgnoreCase(metadata.token0)) {
+                price0Opt = priceService.getCachedPriceInUsdt(metadata.token0);
+            }else{
+                price0Opt = priceService.getCachedPriceInUsdtForV2V3(metadata.token0);
+            }
             if (price0Opt.isPresent()) {
                 total = total.add(snapshot.token0Amount.multiply(price0Opt.get(), PRICE_CONTEXT), PRICE_CONTEXT);
                 hasValue = true;
             }
         }
         if (snapshot.token1Amount != null) {
-            Optional<BigDecimal> price1Opt = priceService.getCachedPriceInUsdt(metadata.token1);
+            Optional<BigDecimal> price1Opt;
+            if(tokenAddress.equalsIgnoreCase(metadata.token1)){
+                price1Opt = priceService.getCachedPriceInUsdt(metadata.token1);
+            }else{
+                price1Opt = priceService.getCachedPriceInUsdtForV2V3(metadata.token1);
+            }
+
             if (price1Opt.isPresent()) {
                 total = total.add(snapshot.token1Amount.multiply(price1Opt.get(), PRICE_CONTEXT), PRICE_CONTEXT);
                 hasValue = true;

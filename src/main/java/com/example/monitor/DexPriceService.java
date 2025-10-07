@@ -412,7 +412,36 @@ public class DexPriceService {
 
         Optional<BigDecimal> viaWbnb = combinePrices(
                 getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, null),
-                getBestPriceForPair(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, null)
+                getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, null)
+        );
+        if (viaWbnb.isPresent()) {
+            return Optional.of(viaWbnb.get().setScale(18, RoundingMode.HALF_UP));
+        }
+
+        return Optional.empty();
+    }
+    /**
+     * 获取指定代币的美元价格（基于缓存） 根据v2v3来查
+     *
+     * @param tokenAddress 代币地址
+     * @return 价格（USDT）
+     */
+    public Optional<BigDecimal> getCachedPriceInUsdtForV2V3(String tokenAddress) {
+        if (tokenAddress == null) {
+            return Optional.empty();
+        }
+        if (tokenAddress.equalsIgnoreCase(DexConstants.USDT_ADDRESS)) {
+            return Optional.of(BigDecimal.ONE);
+        }
+
+        Optional<BigDecimal> direct = getBestPriceForPairForV2V3(tokenAddress, DexConstants.USDT_ADDRESS, null);
+        if (direct.isPresent()) {
+            return Optional.of(direct.get().setScale(18, RoundingMode.HALF_UP));
+        }
+
+        Optional<BigDecimal> viaWbnb = combinePrices(
+                getBestPriceForPairForV2V3(tokenAddress, DexConstants.WBNB_ADDRESS, null),
+                getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, null)
         );
         if (viaWbnb.isPresent()) {
             return Optional.of(viaWbnb.get().setScale(18, RoundingMode.HALF_UP));
@@ -448,6 +477,32 @@ public class DexPriceService {
         weightedPrices.addAll(collectPricesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken));
         weightedPrices.addAll(collectPricesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken));
         weightedPrices.addAll(collectPricesFromPairs(findOrCreateV4Pools(baseToken, quoteToken), baseToken));
+
+        if (weightedPrices.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Optional<BigDecimal> weightedMedian = calculateWeightedMedianPrice(weightedPrices);
+        if (weightedMedian.isPresent()) {
+            return Optional.of(weightedMedian.get().setScale(18, RoundingMode.HALF_UP));
+        }
+
+        Optional<BigDecimal> weightedAverage = calculateWeightedAveragePrice(weightedPrices);
+        return weightedAverage.map(value -> value.setScale(18, RoundingMode.HALF_UP));
+    }
+
+    /**
+     * 获取指定 token 对的最佳价格
+     *
+     * @param baseToken  基础代币
+     * @param quoteToken 报价代币
+     * @param blockNumber 区块高度
+     * @return 价格
+     */
+    private Optional<BigDecimal> getBestPriceForPairForV2V3(String baseToken, String quoteToken, BigInteger blockNumber) {
+        List<WeightedPrice> weightedPrices = new ArrayList<>();
+        weightedPrices.addAll(collectPricesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken));
+        weightedPrices.addAll(collectPricesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken));
 
         if (weightedPrices.isEmpty()) {
             return Optional.empty();
