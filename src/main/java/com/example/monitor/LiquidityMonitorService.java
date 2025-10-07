@@ -9,7 +9,6 @@ import org.web3j.abi.datatypes.Address;
 import org.web3j.abi.datatypes.Event;
 import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.Bytes32;
-import org.web3j.abi.datatypes.generated.Int128;
 import org.web3j.abi.datatypes.generated.Int24;
 import org.web3j.abi.datatypes.generated.Int256;
 import org.web3j.abi.datatypes.generated.Uint128;
@@ -173,8 +172,6 @@ public class LiquidityMonitorService {
                     TypeReference.create(Int24.class),
                     TypeReference.create(Int24.class),
                     TypeReference.create(Int256.class),
-                    TypeReference.create(Int128.class),
-                    TypeReference.create(Int128.class),
                     TypeReference.create(Bytes32.class)
             ));
 
@@ -515,7 +512,7 @@ public class LiquidityMonitorService {
                 return;
             }
             List<Type> data = decodeEventData(logEntry.getData(), MODIFY_LIQUIDITY_EVENT_V4);
-            if (data.size() < 6) {
+            if (data.size() < 4) {
                 return;
             }
             String sender = normalizeAddress(decodeAddress(topics.get(2)));
@@ -531,17 +528,10 @@ public class LiquidityMonitorService {
             String priceRangeText = formatPriceRange(priceRangeOpt);
             V4PoolState existingState = v4PoolStates.get(poolId);
             BigDecimal currentPrice = existingState != null ? existingState.resolvePrice() : null;
-            BigInteger rawAmount0Delta = ((Int128) data.get(3)).getValue();
-            BigInteger rawAmount1Delta = ((Int128) data.get(4)).getValue();
-            Bytes32 saltBytes = (Bytes32) data.get(5);
-            BigDecimal amount0Delta = normalizeTokenAmount(new BigDecimal(rawAmount0Delta), decimals0);
-            BigDecimal amount1Delta = normalizeTokenAmount(new BigDecimal(rawAmount1Delta), decimals1);
-            boolean missingAmount0 = amount0Delta == null;
-            boolean missingAmount1 = amount1Delta == null;
-            boolean bothZero = !missingAmount0 && !missingAmount1
-                    && amount0Delta.compareTo(BigDecimal.ZERO) == 0
-                    && amount1Delta.compareTo(BigDecimal.ZERO) == 0;
-            if (liquidityDelta.signum() != 0 && (missingAmount0 || missingAmount1 || bothZero)) {
+            Bytes32 saltBytes = (Bytes32) data.get(3);
+            BigDecimal amount0Delta = null;
+            BigDecimal amount1Delta = null;
+            if (liquidityDelta.signum() != 0) {
                 Optional<LiquidityEstimation> estimationOpt = estimateV4LiquidityDelta(
                         liquidityDelta,
                         tickLower,
@@ -551,12 +541,8 @@ public class LiquidityMonitorService {
                         currentPrice);
                 if (estimationOpt.isPresent()) {
                     LiquidityEstimation estimation = estimationOpt.get();
-                    if (missingAmount0 || bothZero) {
-                        amount0Delta = applySign(estimation.amount0, sign);
-                    }
-                    if (missingAmount1 || bothZero) {
-                        amount1Delta = applySign(estimation.amount1, sign);
-                    }
+                    amount0Delta = applySign(estimation.amount0, sign);
+                    amount1Delta = applySign(estimation.amount1, sign);
                 }
             }
             String amount0Text = amount0Delta != null ? formatDecimal(amount0Delta) : "unknown";
