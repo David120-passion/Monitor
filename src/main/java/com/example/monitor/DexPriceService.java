@@ -137,14 +137,14 @@ public class DexPriceService {
      */
     private void refreshInitialPools() {
         List<PairMetadata> initialPools = new ArrayList<>();
-        initialPools.addAll(findOrCreatePairs(tokenAddress, DexConstants.USDT_ADDRESS));
-        initialPools.addAll(findOrCreatePairs(tokenAddress, DexConstants.WBNB_ADDRESS));
-        initialPools.addAll(findOrCreateV3Pools(tokenAddress, DexConstants.USDT_ADDRESS));
-        initialPools.addAll(findOrCreateV3Pools(tokenAddress, DexConstants.WBNB_ADDRESS));
+        initialPools.addAll(findPairsForCache(tokenAddress, DexConstants.USDT_ADDRESS));
+        initialPools.addAll(findPairsForCache(tokenAddress, DexConstants.WBNB_ADDRESS));
+        initialPools.addAll(findV3PoolsForCache(tokenAddress, DexConstants.USDT_ADDRESS));
+        initialPools.addAll(findV3PoolsForCache(tokenAddress, DexConstants.WBNB_ADDRESS));
         initialPools.addAll(findOrCreateV4Pools(tokenAddress, DexConstants.USDT_ADDRESS));
         initialPools.addAll(findOrCreateV4Pools(tokenAddress, DexConstants.WBNB_ADDRESS));
-        initialPools.addAll(findOrCreatePairs(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
-        initialPools.addAll(findOrCreateV3Pools(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
+        initialPools.addAll(findPairsForCache(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
+        initialPools.addAll(findV3PoolsForCache(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
         initialPools.addAll(findOrCreateV4Pools(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
 
         Set<String> seen = new HashSet<>();
@@ -478,8 +478,8 @@ public class DexPriceService {
      */
     private Optional<BigDecimal> getBestPriceForPair(String baseToken, String quoteToken, BigInteger blockNumber) {
         List<WeightedPrice> weightedPrices = new ArrayList<>();
-        weightedPrices.addAll(collectPricesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken));
-        weightedPrices.addAll(collectPricesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken));
+        weightedPrices.addAll(collectPricesFromPairs(findPairsForCache(baseToken, quoteToken), baseToken));
+        weightedPrices.addAll(collectPricesFromPairs(findV3PoolsForCache(baseToken, quoteToken), baseToken));
         weightedPrices.addAll(collectPricesFromPairs(findOrCreateV4Pools(baseToken, quoteToken), baseToken));
 
         if (weightedPrices.isEmpty()) {
@@ -505,8 +505,8 @@ public class DexPriceService {
      */
     private Optional<BigDecimal> getBestPriceForPairForV2V3(String baseToken, String quoteToken, BigInteger blockNumber) {
         List<WeightedPrice> weightedPrices = new ArrayList<>();
-        weightedPrices.addAll(collectPricesFromPairs(findOrCreatePairs(baseToken, quoteToken), baseToken));
-        weightedPrices.addAll(collectPricesFromPairs(findOrCreateV3Pools(baseToken, quoteToken), baseToken));
+        weightedPrices.addAll(collectPricesFromPairs(findPairsForCache(baseToken, quoteToken), baseToken));
+        weightedPrices.addAll(collectPricesFromPairs(findV3PoolsForCache(baseToken, quoteToken), baseToken));
 
         if (weightedPrices.isEmpty()) {
             return Optional.empty();
@@ -1067,6 +1067,7 @@ public class DexPriceService {
         return findOrCreatePairs(tokenA, tokenB).stream().findFirst();
     }
 
+
     /**
      * 查找或创建所有 V2 配对信息
      *
@@ -1130,6 +1131,43 @@ public class DexPriceService {
                     pools.add(pairMetadata);
                 }
                 cachePairMetadata(pairMetadata, false);
+            }
+        }
+        return pools;
+    }
+
+    /**
+     * 查找或创建所有 V2 配对信息
+     *
+     * @param tokenA 代币 A
+     * @param tokenB 代币 B
+     * @return 池子信息列表
+     */
+    public List<PairMetadata> findPairsForCache(String tokenA, String tokenB) {
+        String key = buildPairKey(tokenA, tokenB);
+        Map<String, PairMetadata> cachedByAddress = pairCacheByTokens.get(key);
+        if (cachedByAddress != null && !cachedByAddress.isEmpty()) {
+            return new ArrayList<>(cachedByAddress.values());
+        }
+        List<PairMetadata> result = new ArrayList<>();
+        return result;
+    }
+
+    /**
+     * 查找或创建所有可用的 V3 池子信息
+     *
+     * @param tokenA 代币 A
+     * @param tokenB 代币 B
+     * @return 池子信息列表
+     */
+    public List<PairMetadata> findV3PoolsForCache(String tokenA, String tokenB) {
+        List<PairMetadata> pools = new ArrayList<>();
+        for (BigInteger fee : DexConstants.V3_FEE_TIERS) {
+            String key = buildV3PoolKey(tokenA, tokenB, fee);
+            Map<String, PairMetadata> cachedByAddress = v3PoolCache.get(key);
+            if (cachedByAddress != null && !cachedByAddress.isEmpty()) {
+                pools.addAll(cachedByAddress.values());
+                continue;
             }
         }
         return pools;
