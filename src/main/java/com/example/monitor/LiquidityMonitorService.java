@@ -579,7 +579,6 @@ public class LiquidityMonitorService {
             final BigDecimal finalAmount0Delta = amount0Delta;
             final BigDecimal finalAmount1Delta = amount1Delta;
 
-            // ✅ 更新池状态（非累计）
             V4PoolState state = v4PoolStates.compute(poolId, (key, existing) -> {
                 V4PoolState target = existing != null ? existing : new V4PoolState();
                 target.ensureDecimals(decimals0, decimals1);
@@ -695,10 +694,10 @@ public class LiquidityMonitorService {
             BigDecimal normalizedAmount = convertRawAmount(rawAmount, isToken0 ? decimals0 : decimals1);
             BigDecimal delta = BigDecimal.ZERO;
 
-            if (manager != null && to != null && to.equalsIgnoreCase(manager)) {
+            if (sign>0) {
                 delta = delta.add(normalizedAmount);
             }
-            if (manager != null && from != null && from.equalsIgnoreCase(manager)) {
+            if (sign<0) {
                 delta = delta.subtract(normalizedAmount);
             }
 
