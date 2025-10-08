@@ -137,15 +137,19 @@ public class DexPriceService {
      */
     private void refreshInitialPools() {
         List<PairMetadata> initialPools = new ArrayList<>();
-        initialPools.addAll(findPairsForCache(tokenAddress, DexConstants.USDT_ADDRESS));
+        DexConstants.STABLE_TOKEN_ADDRESSES.forEach(stable -> {
+            initialPools.addAll(findPairsForCache(tokenAddress, stable));
+            initialPools.addAll(findV3PoolsForCache(tokenAddress, stable));
+            initialPools.addAll(findOrCreateV4Pools(tokenAddress, stable));
+        });
         initialPools.addAll(findPairsForCache(tokenAddress, DexConstants.WBNB_ADDRESS));
-        initialPools.addAll(findV3PoolsForCache(tokenAddress, DexConstants.USDT_ADDRESS));
         initialPools.addAll(findV3PoolsForCache(tokenAddress, DexConstants.WBNB_ADDRESS));
-        initialPools.addAll(findOrCreateV4Pools(tokenAddress, DexConstants.USDT_ADDRESS));
         initialPools.addAll(findOrCreateV4Pools(tokenAddress, DexConstants.WBNB_ADDRESS));
-        initialPools.addAll(findPairsForCache(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
-        initialPools.addAll(findV3PoolsForCache(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
-        initialPools.addAll(findOrCreateV4Pools(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS));
+        DexConstants.STABLE_TOKEN_ADDRESSES.forEach(stable -> {
+            initialPools.addAll(findPairsForCache(DexConstants.WBNB_ADDRESS, stable));
+            initialPools.addAll(findV3PoolsForCache(DexConstants.WBNB_ADDRESS, stable));
+            initialPools.addAll(findOrCreateV4Pools(DexConstants.WBNB_ADDRESS, stable));
+        });
 
         Set<String> seen = new HashSet<>();
         for (PairMetadata metadata : initialPools) {
@@ -374,17 +378,22 @@ public class DexPriceService {
             return Optional.of(cached);
         }
 
-        Optional<BigDecimal> directBusd = getBestPriceForPair(tokenAddress, DexConstants.USDT_ADDRESS, blockNumber);
-        if (directBusd.isPresent()) {
-            return Optional.of(storePrice(blockNumber, directBusd.get()));
+        for (String stable : DexConstants.STABLE_TOKEN_ADDRESSES) {
+            Optional<BigDecimal> direct = getBestPriceForPair(tokenAddress, stable, blockNumber);
+            if (direct.isPresent()) {
+                return Optional.of(storePrice(blockNumber, direct.get()));
+            }
         }
 
-        Optional<BigDecimal> viaWbnb = combinePrices(
-                getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, blockNumber),
-                getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, blockNumber)
-        );
-        if (viaWbnb.isPresent()) {
-            return Optional.of(storePrice(blockNumber, viaWbnb.get()));
+        Optional<BigDecimal> tokenWbnb = getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, blockNumber);
+        for (String stable : DexConstants.STABLE_TOKEN_ADDRESSES) {
+            Optional<BigDecimal> viaWbnb = combinePrices(
+                    tokenWbnb,
+                    getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, stable, blockNumber)
+            );
+            if (viaWbnb.isPresent()) {
+                return Optional.of(storePrice(blockNumber, viaWbnb.get()));
+            }
         }
 
         BigDecimal fallback = lastKnownPrice.get();
@@ -405,21 +414,27 @@ public class DexPriceService {
         if (tokenAddress == null) {
             return Optional.empty();
         }
-        if (tokenAddress.equalsIgnoreCase(DexConstants.USDT_ADDRESS)) {
+        if (tokenAddress.equalsIgnoreCase(DexConstants.USDT_ADDRESS) ||
+                tokenAddress.equalsIgnoreCase(DexConstants.USDC_ADDRESS)) {
             return Optional.of(BigDecimal.ONE);
         }
 
-        Optional<BigDecimal> direct = getBestPriceForPair(tokenAddress, DexConstants.USDT_ADDRESS, null);
-        if (direct.isPresent()) {
-            return Optional.of(direct.get().setScale(18, RoundingMode.HALF_UP));
+        for (String stable : DexConstants.STABLE_TOKEN_ADDRESSES) {
+            Optional<BigDecimal> direct = getBestPriceForPair(tokenAddress, stable, null);
+            if (direct.isPresent()) {
+                return Optional.of(direct.get().setScale(18, RoundingMode.HALF_UP));
+            }
         }
 
-        Optional<BigDecimal> viaWbnb = combinePrices(
-                getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, null),
-                getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, null)
-        );
-        if (viaWbnb.isPresent()) {
-            return Optional.of(viaWbnb.get().setScale(18, RoundingMode.HALF_UP));
+        Optional<BigDecimal> tokenWbnb = getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, null);
+        for (String stable : DexConstants.STABLE_TOKEN_ADDRESSES) {
+            Optional<BigDecimal> viaWbnb = combinePrices(
+                    tokenWbnb,
+                    getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, stable, null)
+            );
+            if (viaWbnb.isPresent()) {
+                return Optional.of(viaWbnb.get().setScale(18, RoundingMode.HALF_UP));
+            }
         }
 
         return Optional.empty();
@@ -434,21 +449,27 @@ public class DexPriceService {
         if (tokenAddress == null) {
             return Optional.empty();
         }
-        if (tokenAddress.equalsIgnoreCase(DexConstants.USDT_ADDRESS)) {
+        if (tokenAddress.equalsIgnoreCase(DexConstants.USDT_ADDRESS) ||
+                tokenAddress.equalsIgnoreCase(DexConstants.USDC_ADDRESS)) {
             return Optional.of(BigDecimal.ONE);
         }
 
-        Optional<BigDecimal> direct = getBestPriceForPairForV2V3(tokenAddress, DexConstants.USDT_ADDRESS, null);
-        if (direct.isPresent()) {
-            return Optional.of(direct.get().setScale(18, RoundingMode.HALF_UP));
+        for (String stable : DexConstants.STABLE_TOKEN_ADDRESSES) {
+            Optional<BigDecimal> direct = getBestPriceForPairForV2V3(tokenAddress, stable, null);
+            if (direct.isPresent()) {
+                return Optional.of(direct.get().setScale(18, RoundingMode.HALF_UP));
+            }
         }
 
-        Optional<BigDecimal> viaWbnb = combinePrices(
-                getBestPriceForPairForV2V3(tokenAddress, DexConstants.WBNB_ADDRESS, null),
-                getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, DexConstants.USDT_ADDRESS, null)
-        );
-        if (viaWbnb.isPresent()) {
-            return Optional.of(viaWbnb.get().setScale(18, RoundingMode.HALF_UP));
+        Optional<BigDecimal> tokenWbnb = getBestPriceForPairForV2V3(tokenAddress, DexConstants.WBNB_ADDRESS, null);
+        for (String stable : DexConstants.STABLE_TOKEN_ADDRESSES) {
+            Optional<BigDecimal> viaWbnb = combinePrices(
+                    tokenWbnb,
+                    getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, stable, null)
+            );
+            if (viaWbnb.isPresent()) {
+                return Optional.of(viaWbnb.get().setScale(18, RoundingMode.HALF_UP));
+            }
         }
 
         return Optional.empty();

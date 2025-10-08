@@ -32,6 +32,13 @@ public class DexConstants {
     public static final String WBNB_ADDRESS = "0xBB4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
     /** BUSD 代币地址 */
     public static final String USDT_ADDRESS = "0x55d398326f99059ff775485246999027b3197955";
+    /** USDC 代币地址 */
+    public static final String USDC_ADDRESS = "0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d";
+    /** 稳定币地址列表 */
+    public static final List<String> STABLE_TOKEN_ADDRESSES = Collections.unmodifiableList(Arrays.asList(
+            USDT_ADDRESS,
+            USDC_ADDRESS
+    ));
 
     /** PancakeSwap V2 工厂列表 */
     public static final List<String> V2_FACTORIES = Collections.unmodifiableList(Arrays.asList(

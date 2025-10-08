@@ -210,24 +210,26 @@ public class LiquidityMonitorService {
      * 手动注册初始池子
      */
     public void registerInitialPairs() {
-        priceService.findOrCreatePairs(tokenAddress, DexConstants.USDT_ADDRESS)
-                .forEach(pair -> {
-                    registerPool(pair);
-                    subscribeMint(pair, MINT_EVENT_V2);
-                    subscribeBurn(pair, BURN_EVENT_V2);
-                });
+        DexConstants.STABLE_TOKEN_ADDRESSES.forEach(stable ->
+                priceService.findOrCreatePairs(tokenAddress, stable)
+                        .forEach(pair -> {
+                            registerPool(pair);
+                            subscribeMint(pair, MINT_EVENT_V2);
+                            subscribeBurn(pair, BURN_EVENT_V2);
+                        }));
         priceService.findOrCreatePairs(tokenAddress, DexConstants.WBNB_ADDRESS)
                 .forEach(pair -> {
                     registerPool(pair);
                     subscribeMint(pair, MINT_EVENT_V2);
                     subscribeBurn(pair, BURN_EVENT_V2);
                 });
-        priceService.findOrCreateV3Pools(tokenAddress, DexConstants.USDT_ADDRESS)
-                .forEach(pool -> {
-                    registerPool(pool);
-                    subscribeMint(pool, MINT_EVENT_V3);
-                    subscribeBurn(pool, BURN_EVENT_V3);
-                });
+        DexConstants.STABLE_TOKEN_ADDRESSES.forEach(stable ->
+                priceService.findOrCreateV3Pools(tokenAddress, stable)
+                        .forEach(pool -> {
+                            registerPool(pool);
+                            subscribeMint(pool, MINT_EVENT_V3);
+                            subscribeBurn(pool, BURN_EVENT_V3);
+                        }));
         priceService.findOrCreateV3Pools(tokenAddress, DexConstants.WBNB_ADDRESS)
                 .forEach(pool -> {
                     registerPool(pool);
@@ -1792,10 +1794,10 @@ public class LiquidityMonitorService {
 
         BigDecimal tvlAmount;
         String symbol;
-        if (metadata.token1.equalsIgnoreCase(DexConstants.USDT_ADDRESS)) {
+        if (isStableToken(metadata.token1)) {
             symbol = resolveSymbol(metadata.token1Symbol, metadata.token1);
             tvlAmount = amount1.add(amount0.multiply(ratio, PRICE_CONTEXT));
-        } else if (metadata.token0.equalsIgnoreCase(DexConstants.USDT_ADDRESS)) {
+        } else if (isStableToken(metadata.token0)) {
             symbol = resolveSymbol(metadata.token0Symbol, metadata.token0);
             tvlAmount = amount0.add(amount1.divide(ratio, 18, RoundingMode.HALF_UP));
         } else if (metadata.token0.equalsIgnoreCase(tokenAddress)) {
@@ -1814,6 +1816,17 @@ public class LiquidityMonitorService {
         }
 
         return Optional.of(new TvlInfo(tvlAmount.setScale(18, RoundingMode.HALF_UP), symbol));
+    }
+
+    /**
+     * 判断是否为稳定币
+     */
+    private boolean isStableToken(String address) {
+        if (address == null) {
+            return false;
+        }
+        return DexConstants.STABLE_TOKEN_ADDRESSES.stream()
+                .anyMatch(stable -> stable.equalsIgnoreCase(address));
     }
 
     /**
