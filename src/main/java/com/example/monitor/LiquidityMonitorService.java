@@ -23,6 +23,7 @@ import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.Log;
 import org.web3j.protocol.core.methods.response.EthBlock;
 import org.web3j.protocol.core.methods.response.EthLog;
+import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.utils.Numeric;
 
 import java.io.IOException;
@@ -174,6 +175,15 @@ public class LiquidityMonitorService {
                     TypeReference.create(Int256.class),
                     TypeReference.create(Bytes32.class)
             ));
+    /** Transfer 事件 */
+    private static final Event TRANSFER_EVENT = new Event("Transfer",
+            Arrays.asList(
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Address.class, true),
+                    TypeReference.create(Uint256.class)
+            ));
+    /** Transfer 事件主题 */
+    private static final String TRANSFER_EVENT_TOPIC = EventEncoder.encode(TRANSFER_EVENT);
 
     /**
      * 构造函数
@@ -536,19 +546,33 @@ public class LiquidityMonitorService {
             BigDecimal amount1Delta = BigDecimal.ZERO;
 
             if (liquidityDelta.signum() != 0) {
-                Optional<LiquidityEstimation> estimationOpt = estimateV4LiquidityDelta(
-                        liquidityDelta,
-                        tickLower,
-                        tickUpper,
+                Optional<TokenDeltas> transferDeltaOpt = resolveV4TransferDeltas(
+                        metadata,
                         decimals0,
                         decimals1,
-                        currentPrice
+                        logEntry,
+                        sign
                 );
 
-                if (estimationOpt.isPresent()) {
-                    LiquidityEstimation estimation = estimationOpt.get();
-                    amount0Delta = estimation.amount0.multiply(BigDecimal.valueOf(sign));
-                    amount1Delta = estimation.amount1.multiply(BigDecimal.valueOf(sign));
+                if (transferDeltaOpt.isPresent()) {
+                    TokenDeltas deltas = transferDeltaOpt.get();
+                    amount0Delta = deltas.amount0;
+                    amount1Delta = deltas.amount1;
+                } else {
+                    Optional<LiquidityEstimation> estimationOpt = estimateV4LiquidityDelta(
+                            liquidityDelta,
+                            tickLower,
+                            tickUpper,
+                            decimals0,
+                            decimals1,
+                            currentPrice
+                    );
+
+                    if (estimationOpt.isPresent()) {
+                        LiquidityEstimation estimation = estimationOpt.get();
+                        amount0Delta = estimation.amount0.multiply(BigDecimal.valueOf(sign));
+                        amount1Delta = estimation.amount1.multiply(BigDecimal.valueOf(sign));
+                    }
                 }
             }
 
@@ -598,6 +622,118 @@ public class LiquidityMonitorService {
         } catch (Exception ex) {
             log.error("Failed to handle V4 ModifyLiquidity log", ex);
         }
+    }
+
+    /**
+     * 解析 V4 ModifyLiquidity 对应交易中的代币转移
+     */
+    private Optional<TokenDeltas> resolveV4TransferDeltas(V4PoolMetadata metadata,
+                                                          BigInteger decimals0,
+                                                          BigInteger decimals1,
+                                                          Log logEntry,
+                                                          int sign) {
+        if (metadata == null || logEntry == null || sign == 0) {
+            return Optional.empty();
+        }
+        String txHash = logEntry.getTransactionHash();
+        if (txHash == null || txHash.isEmpty()) {
+            return Optional.empty();
+        }
+
+        Optional<TransactionReceipt> receiptOpt = fetchTransactionReceipt(txHash);
+        if (!receiptOpt.isPresent()) {
+            return Optional.empty();
+        }
+
+        TransactionReceipt receipt = receiptOpt.get();
+        List<Log> logs = receipt.getLogs();
+        if (logs == null || logs.isEmpty()) {
+            return Optional.empty();
+        }
+
+        String manager = normalizeAddress(metadata.manager);
+        String currency0 = normalizeAddress(metadata.currency0);
+        String currency1 = normalizeAddress(metadata.currency1);
+
+        BigDecimal amount0 = BigDecimal.ZERO;
+        BigDecimal amount1 = BigDecimal.ZERO;
+
+        for (Log txLog : logs) {
+            List<String> txTopics = txLog.getTopics();
+            if (txTopics == null || txTopics.isEmpty()) {
+                continue;
+            }
+            if (!TRANSFER_EVENT_TOPIC.equalsIgnoreCase(txTopics.get(0))) {
+                continue;
+            }
+
+            String tokenAddress = normalizeAddress(txLog.getAddress());
+            boolean isToken0 = tokenAddress != null && tokenAddress.equalsIgnoreCase(currency0);
+            boolean isToken1 = tokenAddress != null && tokenAddress.equalsIgnoreCase(currency1);
+            if (!isToken0 && !isToken1) {
+                continue;
+            }
+            if (txTopics.size() < 3) {
+                continue;
+            }
+
+            List<Type> decoded = FunctionReturnDecoder.decode(txLog.getData(), TRANSFER_EVENT.getNonIndexedParameters());
+            if (decoded.isEmpty()) {
+                continue;
+            }
+
+            BigInteger rawAmount = ((Uint256) decoded.get(0)).getValue();
+            if (rawAmount == null || rawAmount.equals(BigInteger.ZERO)) {
+                continue;
+            }
+
+            String fromTopic = txTopics.get(1);
+            String toTopic = txTopics.get(2);
+            String from = fromTopic != null ? normalizeAddress(decodeAddress(fromTopic)) : null;
+            String to = toTopic != null ? normalizeAddress(decodeAddress(toTopic)) : null;
+
+            BigDecimal normalizedAmount = convertRawAmount(rawAmount, isToken0 ? decimals0 : decimals1);
+            BigDecimal delta = BigDecimal.ZERO;
+
+            if (manager != null && to != null && to.equalsIgnoreCase(manager)) {
+                delta = delta.add(normalizedAmount);
+            }
+            if (manager != null && from != null && from.equalsIgnoreCase(manager)) {
+                delta = delta.subtract(normalizedAmount);
+            }
+
+            if (delta.compareTo(BigDecimal.ZERO) == 0) {
+                continue;
+            }
+
+            if (isToken0) {
+                amount0 = amount0.add(delta);
+            } else {
+                amount1 = amount1.add(delta);
+            }
+        }
+
+        if (amount0.compareTo(BigDecimal.ZERO) == 0 && amount1.compareTo(BigDecimal.ZERO) == 0) {
+            return Optional.empty();
+        }
+
+        if (sign > 0) {
+            if (amount0.compareTo(BigDecimal.ZERO) < 0) {
+                amount0 = amount0.negate();
+            }
+            if (amount1.compareTo(BigDecimal.ZERO) < 0) {
+                amount1 = amount1.negate();
+            }
+        } else if (sign < 0) {
+            if (amount0.compareTo(BigDecimal.ZERO) > 0) {
+                amount0 = amount0.negate();
+            }
+            if (amount1.compareTo(BigDecimal.ZERO) > 0) {
+                amount1 = amount1.negate();
+            }
+        }
+
+        return Optional.of(new TokenDeltas(amount0, amount1));
     }
 
     /**
@@ -1386,6 +1522,33 @@ public class LiquidityMonitorService {
     }
 
     /**
+     * 根据原始数值与精度转换为十进制金额
+     */
+    private BigDecimal convertRawAmount(BigInteger rawAmount, BigInteger decimals) {
+        if (rawAmount == null) {
+            return BigDecimal.ZERO;
+        }
+        if (decimals == null) {
+            return new BigDecimal(rawAmount);
+        }
+        int scale = Math.max(0, decimals.intValue());
+        BigDecimal divisor = BigDecimal.TEN.pow(scale);
+        return new BigDecimal(rawAmount).divide(divisor, 18, RoundingMode.HALF_UP);
+    }
+
+    /**
+     * 查询交易回执
+     */
+    private Optional<TransactionReceipt> fetchTransactionReceipt(String txHash) {
+        try {
+            return web3j.ethGetTransactionReceipt(txHash).send().getTransactionReceipt();
+        } catch (IOException e) {
+            log.error("Failed to fetch transaction receipt {}", txHash, e);
+            return Optional.empty();
+        }
+    }
+
+    /**
      * 流动性估算结果
      */
     private static class LiquidityEstimation {
@@ -1395,6 +1558,19 @@ public class LiquidityMonitorService {
         private final BigDecimal amount1;
 
         private LiquidityEstimation(BigDecimal amount0, BigDecimal amount1) {
+            this.amount0 = amount0;
+            this.amount1 = amount1;
+        }
+    }
+
+    /**
+     * 代币数量变化
+     */
+    private static class TokenDeltas {
+        private final BigDecimal amount0;
+        private final BigDecimal amount1;
+
+        private TokenDeltas(BigDecimal amount0, BigDecimal amount1) {
             this.amount0 = amount0;
             this.amount1 = amount1;
         }
