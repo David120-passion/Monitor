@@ -49,8 +49,10 @@ import java.util.function.Consumer;
 public class LiquidityMonitorService {
     /** 日志记录器 */
     private static final Logger log = LoggerFactory.getLogger(LiquidityMonitorService.class);
-    /** Web3j 客户端 */
+    /** Web3j HTTP 客户端 */
     private final Web3j web3j;
+    /** WebSocket 订阅使用的 Web3j 客户端 */
+    private final Web3j subscriptionWeb3j;
     /** 目标代币地址 */
     private final String tokenAddress;
     /** 价格服务 */
@@ -190,10 +192,11 @@ public class LiquidityMonitorService {
     /**
      * 构造函数
      */
-    public LiquidityMonitorService(Web3j web3j, String tokenAddress, DexPriceService priceService,
+    public LiquidityMonitorService(Web3j httpWeb3j, Web3j subscriptionWeb3j, String tokenAddress, DexPriceService priceService,
                                    TradeAnalysisService tradeAnalysisService, BigInteger tokenCreationBlock,
                                    DatabaseLogService databaseLogService) {
-        this.web3j = web3j;
+        this.web3j = httpWeb3j;
+        this.subscriptionWeb3j = subscriptionWeb3j;
         this.tokenAddress = tokenAddress.toLowerCase();
         this.priceService = priceService;
         this.tradeAnalysisService = tradeAnalysisService;
@@ -251,7 +254,7 @@ public class LiquidityMonitorService {
     private void subscribeFactory(String factoryAddress, Event event) {
         EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, factoryAddress);
         filter.addSingleTopic(EventEncoder.encode(event));
-        web3j.ethLogFlowable(filter).subscribe(logEntry -> handleFactoryLog(event, logEntry), throwable ->
+        subscriptionWeb3j.ethLogFlowable(filter).subscribe(logEntry -> handleFactoryLog(event, logEntry), throwable ->
                 log.error("Error processing factory event", throwable));
     }
 
@@ -271,7 +274,7 @@ public class LiquidityMonitorService {
         );
         EthFilter initFilter = new EthFilter(subscriptionStart, DefaultBlockParameterName.LATEST, factoryAddress);
         initFilter.addSingleTopic(EventEncoder.encode(initEvent));
-        web3j.ethLogFlowable(initFilter).subscribe(logEntry -> handleV4InitializeLog(factoryAddress, logEntry), throwable ->
+        subscriptionWeb3j.ethLogFlowable(initFilter).subscribe(logEntry -> handleV4InitializeLog(factoryAddress, logEntry), throwable ->
                 log.error("Error processing V4 initialize event", throwable));
     }
 
@@ -548,7 +551,7 @@ public class LiquidityMonitorService {
         EthFilter modifyFilter = new EthFilter(subscriptionStart, DefaultBlockParameterName.LATEST, factoryAddress);
         modifyFilter.addSingleTopic(EventEncoder.encode(MODIFY_LIQUIDITY_EVENT_V4));
         modifyFilter.addOptionalTopics(normalizedPoolId);
-        web3j.ethLogFlowable(modifyFilter).subscribe(logEntry -> handleV4ModifyLiquidityLog(logEntry), throwable ->
+        subscriptionWeb3j.ethLogFlowable(modifyFilter).subscribe(logEntry -> handleV4ModifyLiquidityLog(logEntry), throwable ->
                 log.error("Error processing V4 modify liquidity event", throwable));
     }
 
@@ -827,7 +830,7 @@ public class LiquidityMonitorService {
         }
         EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, pairAddress);
         filter.addSingleTopic(eventTopic);
-        web3j.ethLogFlowable(filter).subscribe(logEntry -> handleBurnLog(pairAddress, token0, token1, event, logEntry), throwable ->
+        subscriptionWeb3j.ethLogFlowable(filter).subscribe(logEntry -> handleBurnLog(pairAddress, token0, token1, event, logEntry), throwable ->
                 log.error("Error processing burn event", throwable));
     }
 
@@ -851,7 +854,7 @@ public class LiquidityMonitorService {
         }
         EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, pairAddress);
         filter.addSingleTopic(eventTopic);
-        web3j.ethLogFlowable(filter).subscribe(logEntry -> handleMintLog(pairAddress, token0, token1, event, logEntry), throwable ->
+        subscriptionWeb3j.ethLogFlowable(filter).subscribe(logEntry -> handleMintLog(pairAddress, token0, token1, event, logEntry), throwable ->
                 log.error("Error processing mint event", throwable));
     }
 
