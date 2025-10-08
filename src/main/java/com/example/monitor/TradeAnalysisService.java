@@ -222,6 +222,8 @@ public class TradeAnalysisService {
     private final String tokenSymbol;
     /** 价格服务 */
     private final DexPriceService priceService;
+    /** 数据库存储服务 */
+    private final DatabaseLogService databaseLogService;
 
     /** 按地址统计的成交数据 */
     private final ConcurrentHashMap<String, AddressTotals> totalsByAddress = new ConcurrentHashMap<>();
@@ -236,11 +238,12 @@ public class TradeAnalysisService {
      * 构造函数
      */
     public TradeAnalysisService(Web3j web3j, String tokenAddress, BigInteger tokenDecimals, String tokenSymbol,
-                                DexPriceService priceService) {
+                                DexPriceService priceService, DatabaseLogService databaseLogService) {
         this.web3j = web3j;
         this.tokenAddress = tokenAddress.toLowerCase(Locale.ROOT);
         this.tokenSymbol = tokenSymbol;
         this.priceService = priceService;
+        this.databaseLogService = databaseLogService;
         int decimals = tokenDecimals == null ? 18 : Math.max(tokenDecimals.intValue(), 0);
         this.decimalFactor = BigDecimal.TEN.pow(decimals);
     }
@@ -336,9 +339,10 @@ public class TradeAnalysisService {
 
             TradeSummary summary = updateTotals(txFromNormalized, detection.direction, detection.tradeAmount, usdValue);
 
-            log.info("TRADE address={} action={} amount={} {} price=${} value=${} totalBuyAmount={} totalSellAmount={} " +
-                            "totalBuyValue=${} totalSellValue=${} netAmount={} netValue=${} avgBuyPrice=${} avgSellPrice=${} trades={} " +
-                            " block={} time={} txHash={}",
+            Instant eventTime = Instant.ofEpochMilli(timestamp);
+            String formattedTime = eventTime.atZone(TARGET_ZONE).format(TIME_FORMATTER);
+            String message = String.format("TRADE address=%s action=%s amount=%s %s price=$%s value=$%s totalBuyAmount=%s totalSellAmount=%s " +
+                            "totalBuyValue=$%s totalSellValue=$%s netAmount=%s netValue=$%s avgBuyPrice=$%s avgSellPrice=$%s trades=%s block=%s time=%s txHash=%s",
                     txFrom,
                     detection.direction.getDisplay(),
                     detection.tradeAmount.setScale(6, RoundingMode.HALF_UP),
@@ -355,8 +359,30 @@ public class TradeAnalysisService {
                     summary.avgSellPrice.setScale(8, RoundingMode.HALF_UP),
                     summary.tradeCount,
                     blockNumber,
-                    Instant.ofEpochMilli(timestamp).atZone(TARGET_ZONE).format(TIME_FORMATTER),
+                    formattedTime,
                     txHash);
+            log.info(message);
+            if (databaseLogService != null) {
+                int tradeCount = summary.tradeCount > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) summary.tradeCount;
+                databaseLogService.logTradeSummary(txHash,
+                        txFromNormalized,
+                        detection.direction.getDisplay(),
+                        detection.tradeAmount,
+                        tokenSymbol,
+                        price,
+                        usdValue,
+                        summary.totalBuyAmount,
+                        summary.totalSellAmount,
+                        summary.totalBuyValue,
+                        summary.totalSellValue,
+                        summary.netAmount,
+                        summary.netValue,
+                        summary.avgBuyPrice,
+                        summary.avgSellPrice,
+                        tradeCount,
+                        blockNumber,
+                        eventTime);
+            }
         } catch (Exception ex) {
             log.error("Failed to analyse trade", ex);
         }

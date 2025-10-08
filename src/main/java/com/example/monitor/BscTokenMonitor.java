@@ -38,10 +38,12 @@ public class BscTokenMonitor {
         }
         log.info("Starting monitor for token={} decimals={}", symbol, decimals);
 
+        DatabaseLogService databaseLogService = new DatabaseLogService("jdbc:h2:./monitor-logs");
         DexPriceService priceService = new DexPriceService(web3j, tokenAddress, decimals, symbol);
-        TradeAnalysisService tradeAnalysisService = new TradeAnalysisService(web3j, tokenAddress, decimals, symbol, priceService);
+        TradeAnalysisService tradeAnalysisService = new TradeAnalysisService(web3j, tokenAddress, decimals, symbol,
+                priceService, databaseLogService);
         LiquidityMonitorService liquidityMonitorService = new LiquidityMonitorService(web3j, tokenAddress, priceService,
-                tradeAnalysisService, creationBlockOpt.orElse(null));
+                tradeAnalysisService, creationBlockOpt.orElse(null), databaseLogService);
         liquidityMonitorService.registerInitialPairs();
         log.info("v2 v3池子初始化完成");
         liquidityMonitorService.start();

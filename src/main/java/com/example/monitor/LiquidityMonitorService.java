@@ -57,6 +57,8 @@ public class LiquidityMonitorService {
     private final DexPriceService priceService;
     /** 交易分析服务 */
     private final TradeAnalysisService tradeAnalysisService;
+    /** 数据库存储服务 */
+    private final DatabaseLogService databaseLogService;
     /** 已注册的池子集合 */
     private final Set<String> registeredPools = ConcurrentHashMap.newKeySet();
     /** 已订阅 Burn 事件的池子集合 */
@@ -189,12 +191,14 @@ public class LiquidityMonitorService {
      * 构造函数
      */
     public LiquidityMonitorService(Web3j web3j, String tokenAddress, DexPriceService priceService,
-                                   TradeAnalysisService tradeAnalysisService, BigInteger tokenCreationBlock) {
+                                   TradeAnalysisService tradeAnalysisService, BigInteger tokenCreationBlock,
+                                   DatabaseLogService databaseLogService) {
         this.web3j = web3j;
         this.tokenAddress = tokenAddress.toLowerCase();
         this.priceService = priceService;
         this.tradeAnalysisService = tradeAnalysisService;
         this.tokenCreationBlock = tokenCreationBlock;
+        this.databaseLogService = databaseLogService;
     }
 
     /**
@@ -213,26 +217,26 @@ public class LiquidityMonitorService {
         DexConstants.STABLE_TOKEN_ADDRESSES.forEach(stable ->
                 priceService.findOrCreatePairs(tokenAddress, stable)
                         .forEach(pair -> {
-                            registerPool(pair);
+                            registerPool(pair, true);
                             subscribeMint(pair, MINT_EVENT_V2);
                             subscribeBurn(pair, BURN_EVENT_V2);
                         }));
         priceService.findOrCreatePairs(tokenAddress, DexConstants.WBNB_ADDRESS)
                 .forEach(pair -> {
-                    registerPool(pair);
+                    registerPool(pair, true);
                     subscribeMint(pair, MINT_EVENT_V2);
                     subscribeBurn(pair, BURN_EVENT_V2);
                 });
         DexConstants.STABLE_TOKEN_ADDRESSES.forEach(stable ->
                 priceService.findOrCreateV3Pools(tokenAddress, stable)
                         .forEach(pool -> {
-                            registerPool(pool);
+                            registerPool(pool, true);
                             subscribeMint(pool, MINT_EVENT_V3);
                             subscribeBurn(pool, BURN_EVENT_V3);
                         }));
         priceService.findOrCreateV3Pools(tokenAddress, DexConstants.WBNB_ADDRESS)
                 .forEach(pool -> {
-                    registerPool(pool);
+                    registerPool(pool, true);
                     subscribeMint(pool, MINT_EVENT_V3);
                     subscribeBurn(pool, BURN_EVENT_V3);
                 });
@@ -309,18 +313,30 @@ public class LiquidityMonitorService {
                     if (metadataOpt.isPresent()) {
                         DexPriceService.PairMetadata metadata = metadataOpt.get();
                         registerPool(metadata);
-                        log.info("PAIR_CREATED pair={} name={} token0={} token1={} liquidity={} time={}",
+                        Instant timestamp = resolveLogTimestamp(logEntry);
+                        String pairName = metadata.getDisplayName();
+                        String swapName = metadata.getSwapName();
+                        String message = String.format("PAIR_CREATED pair=%s name=%s token0=%s token1=%s liquidity=%s time=%s",
                                 pairAddress,
-                                metadata.getDisplayName(),
+                                pairName,
                                 token0,
                                 token1,
                                 liquidity,
-                                formatTimestamp(resolveLogTimestamp(logEntry)));
+                                formatTimestamp(timestamp));
+                        log.info(message);
+                        if (databaseLogService != null) {
+                            databaseLogService.logPairCreated(pairAddress, swapName, pairName, token0, token1, liquidity, timestamp);
+                        }
                         subscribeMint(metadata, MINT_EVENT_V2);
                         subscribeBurn(metadata, BURN_EVENT_V2);
                     } else {
-                        log.info("PAIR_CREATED pair={} token0={} token1={} liquidity={} time={}",
-                                pairAddress, token0, token1, liquidity, formatTimestamp(resolveLogTimestamp(logEntry)));
+                        Instant timestamp = resolveLogTimestamp(logEntry);
+                        String message = String.format("PAIR_CREATED pair=%s token0=%s token1=%s liquidity=%s time=%s",
+                                pairAddress, token0, token1, liquidity, formatTimestamp(timestamp));
+                        log.info(message);
+                        if (databaseLogService != null) {
+                            databaseLogService.logPairCreated(pairAddress, null, null, token0, token1, liquidity, timestamp);
+                        }
                     }
                 }
             } else if (event.equals(POOL_CREATED_EVENT)) {
@@ -342,17 +358,30 @@ public class LiquidityMonitorService {
                     if (metadataOpt.isPresent()) {
                         DexPriceService.PairMetadata metadata = metadataOpt.get();
                         registerPool(metadata);
-                        log.info("POOL_CREATED pool={} name={} fee={} tickSpacing={} time={}",
+                        Instant timestamp = resolveLogTimestamp(logEntry);
+                        String swapName = metadata.getSwapName();
+                        String poolName = metadata.getDisplayName();
+                        BigInteger metadataFee = metadata.fee != null ? metadata.fee : fee;
+                        String message = String.format("POOL_CREATED pool=%s name=%s fee=%s tickSpacing=%s time=%s",
                                 poolAddress,
-                                metadata.getDisplayName(),
-                                formatFee(metadata.fee != null ? metadata.fee : fee),
+                                poolName,
+                                formatFee(metadataFee),
                                 tickSpacing,
-                                formatTimestamp(resolveLogTimestamp(logEntry)));
+                                formatTimestamp(timestamp));
+                        log.info(message);
+                        if (databaseLogService != null) {
+                            databaseLogService.logPoolCreated(poolAddress, swapName, poolName, token0, token1, metadataFee, tickSpacing, timestamp);
+                        }
                         subscribeMint(metadata, MINT_EVENT_V3);
                         subscribeBurn(metadata, BURN_EVENT_V3);
                     } else {
-                        log.info("POOL_CREATED pool={} token0={} token1={} fee={} tickSpacing={} time={}",
-                                poolAddress, token0, token1, fee, tickSpacing, formatTimestamp(resolveLogTimestamp(logEntry)));
+                        Instant timestamp = resolveLogTimestamp(logEntry);
+                        String message = String.format("POOL_CREATED pool=%s token0=%s token1=%s fee=%s tickSpacing=%s time=%s",
+                                poolAddress, token0, token1, fee, tickSpacing, formatTimestamp(timestamp));
+                        log.info(message);
+                        if (databaseLogService != null) {
+                            databaseLogService.logPoolCreated(poolAddress, null, null, token0, token1, fee, tickSpacing, timestamp);
+                        }
                     }
                 }
             }
@@ -446,22 +475,25 @@ public class LiquidityMonitorService {
             }
             Optional<BigDecimal> rawPriceOpt = calculateToken1PerToken0Price(sqrtPriceX96, currency0Decimals, currency1Decimals);
             Optional<BigDecimal> trackedPriceOpt = calculateTargetPriceFromSqrt(sqrtPriceX96, currency0Decimals, currency1Decimals, currency0, currency1);
+            BigDecimal priceToken1PerToken0 = rawPriceOpt.orElse(null);
+            BigDecimal priceToken0PerToken1 = rawPriceOpt
+                    .filter(price -> price.compareTo(BigDecimal.ZERO) > 0)
+                    .map(price -> BigDecimal.ONE.divide(price, 18, RoundingMode.HALF_UP))
+                    .orElse(null);
+            BigDecimal targetTokenPrice = trackedPriceOpt.orElse(null);
             V4PoolState state = v4PoolStates.compute(normalizedPoolId, (key, existing) -> {
                 V4PoolState target = existing != null ? existing : new V4PoolState();
-                target.initialize(currency0Decimals, currency1Decimals, rawPriceOpt.orElse(null));
+                target.initialize(currency0Decimals, currency1Decimals, priceToken1PerToken0);
                 return target;
             });
             if (previous == null && state != null) {
-                String timestampText = formatTimestamp(resolveLogTimestamp(logEntry));
+                Instant timestamp = resolveLogTimestamp(logEntry);
+                String timestampText = formatTimestamp(timestamp);
                 String swapName = resolveV4SwapName(effectiveMetadata);
                 String rawPriceText = rawPriceOpt.map(this::formatDecimal).orElse("unknown");
-                String inversePriceText = rawPriceOpt
-                        .filter(price -> price.compareTo(BigDecimal.ZERO) > 0)
-                        .map(price -> BigDecimal.ONE.divide(price, 18, RoundingMode.HALF_UP))
-                        .map(this::formatDecimal)
-                        .orElse("unknown");
-                String trackedPriceText = trackedPriceOpt.map(this::formatDecimal).orElse("unknown");
-                log.info("poolId = {} topic = POOL_INITIALIZED_V4 swap={} name={} fee={} priceToken1PerToken0={} priceToken0PerToken1={} targetTokenPrice={}  time={}",
+                String inversePriceText = priceToken0PerToken1 != null ? formatDecimal(priceToken0PerToken1) : "unknown";
+                String trackedPriceText = targetTokenPrice != null ? formatDecimal(targetTokenPrice) : "unknown";
+                String message = String.format("poolId = %s topic = POOL_INITIALIZED_V4 swap=%s name=%s fee=%s priceToken1PerToken0=%s priceToken0PerToken1=%s targetTokenPrice=%s  time=%s",
                         poolIdTopic,
                         swapName,
                         effectiveMetadata.getDisplayName(),
@@ -470,6 +502,20 @@ public class LiquidityMonitorService {
                         inversePriceText,
                         trackedPriceText,
                         timestampText);
+                log.info(message);
+                if (databaseLogService != null) {
+                    databaseLogService.logV4Initialize(normalizedPoolId,
+                            swapName,
+                            effectiveMetadata.getDisplayName(),
+                            effectiveMetadata.currency0,
+                            effectiveMetadata.currency1,
+                            fee,
+                            effectiveMetadata.hooks,
+                            priceToken1PerToken0,
+                            priceToken0PerToken1,
+                            targetTokenPrice,
+                            timestamp);
+                }
             }
             subscribeV4ModifyLiquidity(factoryAddress, poolIdTopic);
         } catch (Exception ex) {
@@ -542,6 +588,8 @@ public class LiquidityMonitorService {
             // ✅ 计算 tick 区间价格范围
             Optional<DexPriceService.PriceRange> priceRangeOpt = calculateV4PriceRange(metadata, decimals0, decimals1, tickLower, tickUpper);
             String priceRangeText = formatPriceRange(priceRangeOpt);
+            BigDecimal priceRangeLower = priceRangeOpt.map(range -> range.lower).orElse(null);
+            BigDecimal priceRangeUpper = priceRangeOpt.map(range -> range.upper).orElse(null);
 
             Bytes32 saltBytes = (Bytes32) data.get(3);
             BigDecimal amount0Delta = BigDecimal.ZERO;
@@ -593,18 +641,21 @@ public class LiquidityMonitorService {
             // ✅ 更新 TVL
             updateV4TvlUsdCache(metadata, state);
 
+            BigDecimal amount0RemainingValue = state != null ? state.getAmount0() : null;
+            BigDecimal amount1RemainingValue = state != null ? state.getAmount1() : null;
+            BigDecimal tvlRemainingValue = v4PoolTvlUsdCache.get(poolId);
             String amount0Text = formatDecimal(finalAmount0Delta);
             String amount1Text = formatDecimal(finalAmount1Delta);
-            String amount0Remaining = formatAmount(state != null ? state.getAmount0() : null);
-            String amount1Remaining = formatAmount(state != null ? state.getAmount1() : null);
-            String tvlRemaining = v4PoolTvlUsdCache.get(poolId) + " USD";
+            String amount0Remaining = formatAmount(amount0RemainingValue);
+            String amount1Remaining = formatAmount(amount1RemainingValue);
+            String tvlRemaining = tvlRemainingValue != null ? formatDecimal(tvlRemainingValue) + " USD" : "unknown";
             String timestampText = formatTimestamp(timestamp);
             String swapName = resolveV4SwapName(metadata);
             String salt = saltBytes != null ? Numeric.toHexString(saltBytes.getValue()) : "";
 
-            log.info("POOL_MODIFY_V4 poolId={} action={} swap={} name={} sender={} fee={} " +
-                            "liquidityDelta={} amount0Delta={} amount1Delta={} priceRange={} " +
-                            "amount0Remaining={} amount1Remaining={} tvlRemaining={} salt={} time={}",
+            String message = String.format("POOL_MODIFY_V4 poolId=%s action=%s swap=%s name=%s sender=%s fee=%s " +
+                            "liquidityDelta=%s amount0Delta=%s amount1Delta=%s priceRange=%s " +
+                            "amount0Remaining=%s amount1Remaining=%s tvlRemaining=%s salt=%s time=%s",
                     poolId,
                     action,
                     swapName,
@@ -620,6 +671,25 @@ public class LiquidityMonitorService {
                     tvlRemaining,
                     salt,
                     timestampText);
+            log.info(message);
+            if (databaseLogService != null) {
+                databaseLogService.logV4ModifyLiquidity(poolId,
+                        action,
+                        swapName,
+                        metadata.getDisplayName(),
+                        sender,
+                        metadata.fee,
+                        liquidityDelta,
+                        finalAmount0Delta,
+                        finalAmount1Delta,
+                        priceRangeLower,
+                        priceRangeUpper,
+                        amount0RemainingValue,
+                        amount1RemainingValue,
+                        tvlRemainingValue,
+                        salt,
+                        timestamp);
+            }
         } catch (Exception ex) {
             log.error("Failed to handle V4 ModifyLiquidity log", ex);
         }
@@ -802,6 +872,8 @@ public class LiquidityMonitorService {
                     poolType == DexPriceService.PoolType.V2,
                     poolType,
                     null);
+            Instant timestamp = resolveLogTimestamp(logEntry);
+            String timestampText = formatTimestamp(timestamp);
             if (event.equals(BURN_EVENT_V2)) {
                 List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
                 if (data.size() < 2) {
@@ -814,9 +886,13 @@ public class LiquidityMonitorService {
                 String sender = logEntry.getTopics().size() > 1 ? decodeAddress(logEntry.getTopics().get(1)) : "";
                 String to = logEntry.getTopics().size() > 2 ? decodeAddress(logEntry.getTopics().get(2)) : "";
                 String pairName = formatPairName(metadataOpt, token0, token1);
-                log.info("POOL_REMOVED pair={} name={} sender={} to={} token0={} token1={} amount0={} amount1={} time={}",
+                String message = String.format("POOL_REMOVED pair=%s name=%s sender=%s to=%s token0=%s token1=%s amount0=%s amount1=%s time=%s",
                         pairAddress, pairName, sender, to, token0, token1, normalized0, normalized1,
-                        formatTimestamp(resolveLogTimestamp(logEntry)));
+                        timestampText);
+                log.info(message);
+                if (databaseLogService != null) {
+                    databaseLogService.logBurnV2(pairAddress, pairName, sender, to, token0, token1, normalized0, normalized1, timestamp);
+                }
                 if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
                 }
             } else if (event.equals(BURN_EVENT_V3)) {
@@ -839,11 +915,18 @@ public class LiquidityMonitorService {
                 Optional<DexPriceService.PriceRange> priceRangeOpt = metadataOpt.flatMap(meta ->
                         priceService.calculateTargetPriceRange(meta, tickLower, tickUpper));
                 String priceRange = formatPriceRange(priceRangeOpt);
+                BigDecimal priceLower = priceRangeOpt.map(range -> range.lower).orElse(null);
+                BigDecimal priceUpper = priceRangeOpt.map(range -> range.upper).orElse(null);
                 String pairName = formatPairName(metadataOpt, token0, token1);
-                String feeText = metadataOpt.map(meta -> formatFee(meta.fee)).orElse(formatFee(null));
-                log.info("POOL_REMOVED_V3 pool={} name={} owner={} fee={} priceRange={} token0={} token1={}  burnedLiquidity={} amount0={} amount1={} time={}",
-                        pairAddress, pairName, owner, feeText, priceRange, token0, token1,  burnedLiquidity, normalized0, normalized1,
-                        formatTimestamp(resolveLogTimestamp(logEntry)));
+                BigInteger feeValue = metadataOpt.map(meta -> meta.fee).orElse(null);
+                String feeText = formatFee(feeValue);
+                String message = String.format("POOL_REMOVED_V3 pool=%s name=%s owner=%s fee=%s priceRange=%s token0=%s token1=%s  burnedLiquidity=%s amount0=%s amount1=%s time=%s",
+                        pairAddress, pairName, owner, feeText, priceRange, token0, token1, burnedLiquidity, normalized0, normalized1,
+                        timestampText);
+                log.info(message);
+                if (databaseLogService != null) {
+                    databaseLogService.logBurnV3(pairAddress, pairName, owner, feeValue, priceLower, priceUpper, token0, token1, burnedLiquidity, normalized0, normalized1, timestamp);
+                }
                 if (amount0.equals(BigInteger.ZERO) || amount1.equals(BigInteger.ZERO)) {
                 }
             }
@@ -871,6 +954,8 @@ public class LiquidityMonitorService {
                     poolType == DexPriceService.PoolType.V2,
                     poolType,
                     null);
+            Instant timestamp = resolveLogTimestamp(logEntry);
+            String timestampText = formatTimestamp(timestamp);
             if (event.equals(MINT_EVENT_V2)) {
                 List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
                 if (data.size() < 2) {
@@ -882,9 +967,13 @@ public class LiquidityMonitorService {
                 BigDecimal normalized1 = normalizeAmount(amount1, metadataOpt, false);
                 String sender = logEntry.getTopics().size() > 1 ? decodeAddress(logEntry.getTopics().get(1)) : "";
                 String pairName = formatPairName(metadataOpt, token0, token1);
-                log.info("POOL_ADDED pair={} name={} sender={} token0={} token1={} amount0={} amount1={} time={}",
+                String message = String.format("POOL_ADDED pair=%s name=%s sender=%s token0=%s token1=%s amount0=%s amount1=%s time=%s",
                         pairAddress, pairName, sender, token0, token1, normalized0, normalized1,
-                        formatTimestamp(resolveLogTimestamp(logEntry)));
+                        timestampText);
+                log.info(message);
+                if (databaseLogService != null) {
+                    databaseLogService.logMintV2(pairAddress, pairName, sender, token0, token1, normalized0, normalized1, timestamp);
+                }
             } else if (event.equals(MINT_EVENT_V3)) {
                 List<Type> data = FunctionReturnDecoder.decode(logEntry.getData(), event.getNonIndexedParameters());
                 if (data.size() < 4) {
@@ -906,11 +995,18 @@ public class LiquidityMonitorService {
                 Optional<DexPriceService.PriceRange> priceRangeOpt = metadataOpt.flatMap(meta ->
                         priceService.calculateTargetPriceRange(meta, tickLower, tickUpper));
                 String priceRange = formatPriceRange(priceRangeOpt);
+                BigDecimal priceLower = priceRangeOpt.map(range -> range.lower).orElse(null);
+                BigDecimal priceUpper = priceRangeOpt.map(range -> range.upper).orElse(null);
                 String pairName = formatPairName(metadataOpt, token0, token1);
-                String feeText = metadataOpt.map(meta -> formatFee(meta.fee)).orElse(formatFee(null));
-                log.info("POOL_ADDED_V3 pool={} name={} sender={} owner={} fee={} priceRange={} token0={} token1={}  amount0={} amount1={} time={}",
-                        pairAddress, pairName, sender, owner, feeText, priceRange, token0, token1,  normalized0, normalized1,
-                        formatTimestamp(resolveLogTimestamp(logEntry)));
+                BigInteger feeValue = metadataOpt.map(meta -> meta.fee).orElse(null);
+                String feeText = formatFee(feeValue);
+                String message = String.format("POOL_ADDED_V3 pool=%s name=%s sender=%s owner=%s fee=%s priceRange=%s token0=%s token1=%s  amount0=%s amount1=%s time=%s",
+                        pairAddress, pairName, sender, owner, feeText, priceRange, token0, token1, normalized0, normalized1,
+                        timestampText);
+                log.info(message);
+                if (databaseLogService != null) {
+                    databaseLogService.logMintV3(pairAddress, pairName, sender, owner, feeValue, priceLower, priceUpper, token0, token1, normalized0, normalized1, timestamp);
+                }
             }
             metadataOpt.ifPresent(this::refreshTvlCacheForPair);
         } catch (Exception ex) {
@@ -931,6 +1027,10 @@ public class LiquidityMonitorService {
      * @param metadata 池子元数据
      */
     private void registerPool(DexPriceService.PairMetadata metadata) {
+        registerPool(metadata, false);
+    }
+
+    private void registerPool(DexPriceService.PairMetadata metadata, boolean persistLog) {
         if (metadata == null || metadata.pairAddress == null) {
             return;
         }
@@ -942,15 +1042,15 @@ public class LiquidityMonitorService {
         if (registeredPools.add(normalized)) {
             Optional<DexPriceService.PoolSnapshot> snapshotOpt = priceService.loadPoolSnapshot(metadata);
             snapshotOpt.ifPresent(snapshot -> cacheUsdTvl(metadata, snapshot));
-            String amount0Text = snapshotOpt.map(snapshot -> snapshot.token0Amount)
-                    .map(this::formatDecimal)
-                    .orElse("unknown");
-            String amount1Text = snapshotOpt.map(snapshot -> snapshot.token1Amount)
-                    .map(this::formatDecimal)
-                    .orElse("unknown");
+            BigDecimal amount0Value = snapshotOpt.map(snapshot -> snapshot.token0Amount).orElse(null);
+            BigDecimal amount1Value = snapshotOpt.map(snapshot -> snapshot.token1Amount).orElse(null);
+            String amount0Text = amount0Value != null ? formatDecimal(amount0Value) : "unknown";
+            String amount1Text = amount1Value != null ? formatDecimal(amount1Value) : "unknown";
 
-            String tvlText = poolTvlUsdCache.get(normalized).toString() +"USD";
+            BigDecimal tvlValue = poolTvlUsdCache.get(normalized);
+            String tvlText = tvlValue != null ? formatDecimal(tvlValue) + " USD" : "unknown";
             String swapName = metadata.getSwapName();
+            Instant eventTime = Instant.now();
             if (metadata.poolType == DexPriceService.PoolType.V3) {
                 Optional<DexPriceService.PriceRange> priceRangeOpt = snapshotOpt
                         .filter(snapshot -> snapshot.currentTick != null && snapshot.tickSpacing != null)
@@ -959,7 +1059,9 @@ public class LiquidityMonitorService {
                                 snapshot.currentTick + snapshot.tickSpacing))
                         .orElse(Optional.empty());
                 String priceRangeText = formatPriceRange(priceRangeOpt);
-                log.info("POOL_REGISTERED pair={} swap={} name={} fee={} amount0={} amount1={} priceRange={}  tvl={}",
+                BigDecimal priceLower = priceRangeOpt.map(range -> range.lower).orElse(null);
+                BigDecimal priceUpper = priceRangeOpt.map(range -> range.upper).orElse(null);
+                String message = String.format("POOL_REGISTERED pair=%s swap=%s name=%s fee=%s amount0=%s amount1=%s priceRange=%s  tvl=%s",
                         metadata.pairAddress,
                         swapName,
                         metadata.getDisplayName(),
@@ -968,14 +1070,24 @@ public class LiquidityMonitorService {
                         amount1Text,
                         priceRangeText,
                         tvlText);
+                log.info(message);
+                if (persistLog && databaseLogService != null) {
+                    databaseLogService.logPoolRegistration(metadata.pairAddress, swapName, metadata.getDisplayName(),
+                            metadata.fee, amount0Value, amount1Value, priceLower, priceUpper, tvlValue, eventTime);
+                }
             } else {
-                log.info("POOL_REGISTERED pair={} swap={} name={} amount0={} amount1={} tvl={}",
+                String message = String.format("POOL_REGISTERED pair=%s swap=%s name=%s amount0=%s amount1=%s tvl=%s",
                         metadata.pairAddress,
                         swapName,
                         metadata.getDisplayName(),
                         amount0Text,
                         amount1Text,
                         tvlText);
+                log.info(message);
+                if (persistLog && databaseLogService != null) {
+                    databaseLogService.logPoolRegistration(metadata.pairAddress, swapName, metadata.getDisplayName(),
+                            metadata.fee, amount0Value, amount1Value, null, null, tvlValue, eventTime);
+                }
             }
         }
     }
