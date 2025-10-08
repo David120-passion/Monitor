@@ -214,8 +214,10 @@ public class TradeAnalysisService {
         SUPPORTED_SWAP_SIGNATURES.forEach(item -> System.out.println(item));
     }
 
-    /** Web3j 客户端 */
+    /** Web3j HTTP 客户端 */
     private final Web3j web3j;
+    /** WebSocket 订阅用的 Web3j 客户端 */
+    private final Web3j subscriptionWeb3j;
     /** 监控的代币地址 */
     private final String tokenAddress;
     /** 代币符号 */
@@ -237,9 +239,10 @@ public class TradeAnalysisService {
     /**
      * 构造函数
      */
-    public TradeAnalysisService(Web3j web3j, String tokenAddress, BigInteger tokenDecimals, String tokenSymbol,
+    public TradeAnalysisService(Web3j httpWeb3j, Web3j subscriptionWeb3j, String tokenAddress, BigInteger tokenDecimals, String tokenSymbol,
                                 DexPriceService priceService, DatabaseLogService databaseLogService) {
-        this.web3j = web3j;
+        this.web3j = httpWeb3j;
+        this.subscriptionWeb3j = subscriptionWeb3j;
         this.tokenAddress = tokenAddress.toLowerCase(Locale.ROOT);
         this.tokenSymbol = tokenSymbol;
         this.priceService = priceService;
@@ -279,7 +282,7 @@ public class TradeAnalysisService {
 
         EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, tokenAddress);
         filter.addSingleTopic(EventEncoder.encode(TRANSFER_EVENT));
-        web3j.ethLogFlowable(filter).subscribe(this::handleTransferLog, throwable ->
+        subscriptionWeb3j.ethLogFlowable(filter).subscribe(this::handleTransferLog, throwable ->
                 log.error("Error processing trade analysis transfer log", throwable));
     }
 
