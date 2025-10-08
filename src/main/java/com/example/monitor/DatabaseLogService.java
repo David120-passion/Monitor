@@ -177,7 +177,7 @@ public class DatabaseLogService {
                     "amount DECIMAL(38, 18), " +
                     "token_symbol VARCHAR(64), " +
                     "price DECIMAL(38, 18), " +
-                    "value DECIMAL(38, 18), " +
+                    "notional_value DECIMAL(38, 18), " +
                     "total_buy_amount DECIMAL(38, 18), " +
                     "total_sell_amount DECIMAL(38, 18), " +
                     "total_buy_value DECIMAL(38, 18), " +
@@ -488,7 +488,7 @@ public class DatabaseLogService {
                                 BigDecimal amount,
                                 String tokenSymbol,
                                 BigDecimal price,
-                                BigDecimal value,
+                                BigDecimal notionalValue,
                                 BigDecimal totalBuyAmount,
                                 BigDecimal totalSellAmount,
                                 BigDecimal totalBuyValue,
@@ -503,7 +503,7 @@ public class DatabaseLogService {
         if (txHash == null || address == null || action == null) {
             return;
         }
-        String sql = "INSERT INTO trade_logs (tx_hash, address, action, amount, token_symbol, price, value, total_buy_amount, total_sell_amount, total_buy_value, total_sell_value, net_amount, net_value, avg_buy_price, avg_sell_price, trade_count, block_number, event_time) " +
+        String sql = "INSERT INTO trade_logs (tx_hash, address, action, amount, token_symbol, price, notional_value, total_buy_amount, total_sell_amount, total_buy_value, total_sell_value, net_amount, net_value, avg_buy_price, avg_sell_price, trade_count, block_number, event_time) " +
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         try (Connection connection = dataSource.getConnection();
              PreparedStatement ps = connection.prepareStatement(sql)) {
@@ -513,7 +513,7 @@ public class DatabaseLogService {
             setBigDecimal(ps, 4, amount);
             ps.setString(5, tokenSymbol);
             setBigDecimal(ps, 6, price);
-            setBigDecimal(ps, 7, value);
+            setBigDecimal(ps, 7, notionalValue);
             setBigDecimal(ps, 8, totalBuyAmount);
             setBigDecimal(ps, 9, totalSellAmount);
             setBigDecimal(ps, 10, totalBuyValue);
