@@ -54,9 +54,9 @@ public class BscTokenMonitor {
         liquidityMonitorService.start();
         log.info("流动性监控服务已启动");
 //        tradeAnalysisService.start();
-        log.info("交易分析服务已启动");
+//        log.info("交易分析服务已启动");
 //        priceService.initializePriceSampler();
-        log.info("价格采样器已初始化");
+//        log.info("价格采样器已初始化");
 
         log.info("Monitor started. Press Ctrl+C to exit.");
 

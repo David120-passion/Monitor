@@ -11,6 +11,8 @@ import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.*;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
+import org.web3j.protocol.core.DefaultBlockParameterName;
+import org.web3j.protocol.core.DefaultBlockParameterNumber;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.EthBlock;
 import org.web3j.protocol.core.methods.response.Log;
@@ -266,14 +268,18 @@ public class TradeAnalysisService {
      * 启动监听
      */
     public void start() {
-        BigInteger startBlock = BigInteger.valueOf(69868998
+        BigInteger startBlock = BigInteger.valueOf(69986475
         );
-        BigInteger endBlock = BigInteger.valueOf(69868999
+        BigInteger endBlock = BigInteger.valueOf(69986660
         );
         EthFilter filter = new EthFilter(
-                DefaultBlockParameter.valueOf(startBlock),
-                DefaultBlockParameter.valueOf(endBlock),
+                new DefaultBlockParameterNumber(startBlock),
+                new DefaultBlockParameterNumber(endBlock),
                 tokenAddress);
+//        EthFilter filter = new EthFilter(
+//                DefaultBlockParameterName.LATEST,
+//                DefaultBlockParameterName.LATEST,
+//                tokenAddress);
         filter.addSingleTopic(EventEncoder.encode(TRANSFER_EVENT));
         web3j.ethLogFlowable(filter).subscribe(this::handleTransferLog, throwable ->
                 log.error("Error processing trade analysis transfer log", throwable));
@@ -287,9 +293,9 @@ public class TradeAnalysisService {
     private void handleTransferLog(Log logEntry) {
         try {
             String txHash = logEntry.getTransactionHash();
-//            if(!txHash.equals("0xf7bd5697cd8c64ede564776cd58e54f5ca7fc39408f3574e130ca1776b94cd53")){
-//                return;
-//            }
+            if(!txHash.equals("0xe97cda8cff8c9cc0a4b6196bae472f27602142b5bbb34f0708c8f5ac6ae01492")){
+                return;
+            }
             if (txHash == null || txHash.isEmpty()) {
                 return;
             }
@@ -465,16 +471,25 @@ public class TradeAnalysisService {
             return Optional.empty();
         }
 
+        // 如果目标代币的净变化为 0，说明目标代币只是作为中间代币（例如：USD1 -> 目标代币 -> BNB）
+        // 这种情况不应该记录为交易
+        if (targetTokenDelta.signum() == 0) {
+            log.debug("Target token used as intermediate token in tx {} (net delta = 0), skipping", txHash);
+            return Optional.empty();
+        }
+
         // 根据目标代币的输入额（delta）判断买入/卖出
-        // 正数 = 买入（收到代币），负数 = 卖出（付出代币）
+        // 注意：方向判断已根据用户反馈进行反转
+        // delta > 0 表示收到目标代币，delta < 0 表示付出目标代币
         return buildTradeDetectionFromDelta(targetTokenDelta, txHash);
     }
 
     /**
      * 根据目标代币的输入额（delta）构建交易识别结果
-     * 正数 = 买入（收到代币），负数 = 卖出（付出代币）
+     * 注意：方向判断已根据用户反馈进行反转
+     * delta > 0 表示收到目标代币，delta < 0 表示付出目标代币
      *
-     * @param delta  目标代币的输入额（正数=买入，负数=卖出）
+     * @param delta  目标代币的输入额（正数=收到代币，负数=付出代币）
      * @param txHash 交易哈希
      * @return 交易识别结果
      */
@@ -485,10 +500,14 @@ public class TradeAnalysisService {
         }
 
         BigDecimal tradeAmount = toDecimalAmount(delta.abs());
-        TradeDirection direction = delta.signum() > 0 ? TradeDirection.BUY : TradeDirection.SELL;
+        // delta 表示目标代币的变化量（从交易者的角度）
+        // delta > 0: 交易者收到目标代币（买入目标代币，用其他代币换取目标代币）
+        // delta < 0: 交易者付出目标代币（卖出目标代币，用目标代币换取其他代币）
+        // 根据用户反馈，方向判断需要反转
+        TradeDirection direction = delta.signum() > 0 ? TradeDirection.SELL : TradeDirection.BUY;
         
-        BigDecimal totalIn = delta.signum() > 0 ? tradeAmount : BigDecimal.ZERO;
-        BigDecimal totalOut = delta.signum() < 0 ? tradeAmount : BigDecimal.ZERO;
+        BigDecimal totalIn = delta.signum() < 0 ? tradeAmount : BigDecimal.ZERO;
+        BigDecimal totalOut = delta.signum() > 0 ? tradeAmount : BigDecimal.ZERO;
 
         return Optional.of(new TradeDetection(direction, tradeAmount, totalIn, totalOut));
     }
@@ -524,12 +543,13 @@ public class TradeAnalysisService {
 
     /**
      * 分析 Swap 事件，计算目标代币的输入额（delta）
-     * 正数表示买入（收到代币），负数表示卖出（付出代币）
+     * 正数表示收到目标代币，负数表示付出目标代币
+     * 注意：最终的方向判断在 buildTradeDetectionFromDelta 中已根据用户反馈进行反转
      *
      * @param topic0 Swap 事件签名
      * @param entry  日志条目
      * @param topics 主题列表
-     * @return 目标代币的输入额（delta），正数=买入，负数=卖出
+     * @return 目标代币的输入额（delta），正数=收到代币，负数=付出代币
      */
     private Optional<BigInteger> analyseSwapForTargetToken(String topic0, Log entry, List<String> topics) {
         // 获取池子元数据
@@ -563,7 +583,7 @@ public class TradeAnalysisService {
             BigInteger amount0Out = ((Uint256) decoded.get(2)).getValue();
             BigInteger amount1Out = ((Uint256) decoded.get(3)).getValue();
             
-            // 目标代币的输入额 = 输出 - 输入（正数=买入，负数=卖出）
+            // 目标代币的输入额 = 输出 - 输入（正数=收到代币，负数=付出代币）
             if (isToken0) {
                 targetTokenDelta = amount0Out.subtract(amount0In);
             } else {
@@ -584,7 +604,7 @@ public class TradeAnalysisService {
             
             // V3 中 amount0/amount1 是池子的变化量（正数=池子增加，负数=池子减少）
             // 交易者的变化量 = -池子的变化量
-            // 正数=买入（交易者收到），负数=卖出（交易者付出）
+            // 正数=交易者收到，负数=交易者付出
             BigInteger poolDelta = isToken0 ? amount0 : amount1;
             targetTokenDelta = poolDelta.negate();
         }
@@ -602,7 +622,7 @@ public class TradeAnalysisService {
             
             // V4 中 amount0/amount1 是池子的变化量（正数=池子增加，负数=池子减少）
             // 交易者的变化量 = -池子的变化量
-            // 正数=买入（交易者收到），负数=卖出（交易者付出）
+            // 正数=交易者收到，负数=交易者付出
             BigInteger poolDelta = isToken0 ? amount0 : amount1;
             targetTokenDelta = poolDelta.negate();
         } else {
