@@ -155,9 +155,9 @@ public class TradeAnalysisService {
      *         uint24 fee,
      *         uint16 protocolFee
      *     );
-        * uniswap
-     *    event Swap(
-     *         PoolId indexed id,
+     * uniswap
+     *     event Swap(
+     *         bytes32 indexed id,
      *         address indexed sender,
      *         int128 amount0,
      *         int128 amount1,
@@ -179,6 +179,7 @@ public class TradeAnalysisService {
                     TypeReference.create(Uint24.class),
                     TypeReference.create(Uint16.class)
             ));
+
     private static final Event UNISWAP_EVENT_V4 = new Event("Swap",
             Arrays.asList(
                     TypeReference.create(Bytes32.class, true),
@@ -188,7 +189,7 @@ public class TradeAnalysisService {
                     TypeReference.create(Uint160.class),
                     TypeReference.create(Uint128.class),
                     TypeReference.create(Int24.class),
-                    TypeReference.create(Int24.class)
+                    TypeReference.create(Uint24.class)
             ));
     private static final String PANCAKESWAP_EVENT_SIGNATURE_V4 = EventEncoder.encode(PANCAKESWAP_EVENT_V4);
     private static final String UNISWAP_EVENT_SIGNATURE_V4 = EventEncoder.encode(UNISWAP_EVENT_V4);
@@ -390,23 +391,20 @@ public class TradeAnalysisService {
     }
 
     /**
-     * 分析交易日志，匹配 Swap 与 Transfer 事件
+     * 分析交易日志，匹配目标代币池子的 Swap 事件
      *
      * @param txFromNormalized 交易发起人地址（小写）
      * @param logs             交易所有日志
+     * @param txHash           交易哈希
      * @return 交易识别结果
      */
     private Optional<TradeDetection> analyseTransactionLogs(String txFromNormalized, List<Log> logs, String txHash) {
         if (logs == null || logs.isEmpty()) {
             return Optional.empty();
         }
-        BigInteger swapInRaw = BigInteger.ZERO;
-        BigInteger swapOutRaw = BigInteger.ZERO;
-        boolean swapMatched = false;
-        boolean swapSignatureDetected = false;
 
-        BigInteger transferInRaw = BigInteger.ZERO;
-        BigInteger transferOutRaw = BigInteger.ZERO;
+        BigInteger targetTokenDelta = BigInteger.ZERO;
+        boolean swapMatched = false;
 
         for (Log entry : logs) {
             List<String> topics = entry.getTopics();
@@ -414,53 +412,85 @@ public class TradeAnalysisService {
                 continue;
             }
             String topic0 = topics.get(0).toLowerCase(Locale.ROOT);
-            if (SUPPORTED_SWAP_SIGNATURES.contains(topic0)) {
-                swapSignatureDetected = true;
-                Optional<TokenFlow> flowOpt = analyseSwapLog(topic0, entry, topics);
-                if (flowOpt.isPresent()) {
-                    swapMatched = true;
-                    TokenFlow flow = flowOpt.get();
-                    swapInRaw = swapInRaw.add(flow.received);
-                    swapOutRaw = swapOutRaw.add(flow.sent);
+            
+            // 检查是否是支持的 Swap 事件
+            if (!SUPPORTED_SWAP_SIGNATURES.contains(topic0)) {
+                continue;
+            }
+
+            // V2/V3: 直接检查地址是否在 DexPriceService 的缓存中
+            if (SWAP_EVENT_SIGNATURE_V2_NORMALIZED.equals(topic0) ||
+                PANCAKE_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0) ||
+                UNISWAP_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0)) {
+                String poolAddress = entry.getAddress();
+                if (poolAddress != null && priceService.isCachedPoolAddress(poolAddress)) {
+                    Optional<BigInteger> deltaOpt = analyseSwapForTargetToken(topic0, entry, topics);
+                    if (deltaOpt.isPresent()) {
+                        targetTokenDelta = targetTokenDelta.add(deltaOpt.get());
+                        swapMatched = true;
+                    }
                 }
             }
-
-            if (!tokenAddress.equalsIgnoreCase(entry.getAddress())) {
-                continue;
-            }
-            if (!TRANSFER_EVENT_SIGNATURE.equals(topic0)) {
-                continue;
-            }
-            if (topics.size() < 3) {
-                continue;
-            }
-            String from = decodeAddress(topics.get(1));
-            String to = decodeAddress(topics.get(2));
-            List<Type> decoded = FunctionReturnDecoder.decode(entry.getData(), TRANSFER_EVENT.getNonIndexedParameters());
-            if (decoded.isEmpty()) {
-                continue;
-            }
-
-            BigInteger value = (BigInteger) decoded.get(0).getValue();
-            if (txFromNormalized.equals(normalizeAddress(from))) {
-                transferOutRaw = transferOutRaw.add(value);
-            }
-            if (txFromNormalized.equals(normalizeAddress(to))) {
-                transferInRaw = transferInRaw.add(value);
+            // V4: 检查合约地址和 poolId
+            else if (PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0) ||
+                     UNISWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0)) {
+                String contractAddress = entry.getAddress();
+                if (contractAddress != null) {
+                    String normalizedContract = normalizeAddress(contractAddress);
+                    // 检查是否是 PancakeSwap 或 Uniswap V4 合约地址
+                    if (normalizedContract.equals(normalizeAddress(DexConstants.PANCAKE_V4_FACTORY)) ||
+                        normalizedContract.equals(normalizeAddress(DexConstants.UNISWAP_V4_FACTORY))) {
+                        if (topics.size() >= 2) {
+                            String poolId = normalizePoolId(topics.get(1));
+                            if (poolId != null) {
+                                // 先检查本地 v4Pools，再检查 DexPriceService 缓存
+                                String poolIdLower = poolId.toLowerCase(Locale.ROOT);
+                                boolean isV4Pool = v4Pools.containsKey(poolIdLower) || 
+                                                   priceService.isCachedV4PoolId(poolId);
+                                if (isV4Pool) {
+                                    Optional<BigInteger> deltaOpt = analyseSwapForTargetToken(topic0, entry, topics);
+                                    if (deltaOpt.isPresent()) {
+                                        targetTokenDelta = targetTokenDelta.add(deltaOpt.get());
+                                        swapMatched = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        if (swapMatched) {
-            return buildTradeDetection(swapInRaw, swapOutRaw, txHash);
-        }
-        if (!swapSignatureDetected) {
+        if (!swapMatched) {
             return Optional.empty();
         }
-        if (transferInRaw.signum() == 0 && transferOutRaw.signum() == 0) {
-            log.info("Zero trade amounts detected in tx {}", txHash);
+
+        // 根据目标代币的输入额（delta）判断买入/卖出
+        // 正数 = 买入（收到代币），负数 = 卖出（付出代币）
+        return buildTradeDetectionFromDelta(targetTokenDelta, txHash);
+    }
+
+    /**
+     * 根据目标代币的输入额（delta）构建交易识别结果
+     * 正数 = 买入（收到代币），负数 = 卖出（付出代币）
+     *
+     * @param delta  目标代币的输入额（正数=买入，负数=卖出）
+     * @param txHash 交易哈希
+     * @return 交易识别结果
+     */
+    private Optional<TradeDetection> buildTradeDetectionFromDelta(BigInteger delta, String txHash) {
+        if (delta == null || delta.signum() == 0) {
+            log.info("Zero trade delta detected in tx {}", txHash);
             return Optional.empty();
         }
-        return buildTradeDetection(transferInRaw, transferOutRaw, txHash);
+
+        BigDecimal tradeAmount = toDecimalAmount(delta.abs());
+        TradeDirection direction = delta.signum() > 0 ? TradeDirection.BUY : TradeDirection.SELL;
+        
+        BigDecimal totalIn = delta.signum() > 0 ? tradeAmount : BigDecimal.ZERO;
+        BigDecimal totalOut = delta.signum() < 0 ? tradeAmount : BigDecimal.ZERO;
+
+        return Optional.of(new TradeDetection(direction, tradeAmount, totalIn, totalOut));
     }
 
     private Optional<TradeDetection> buildTradeDetection(BigInteger totalInRaw, BigInteger totalOutRaw, String txHash) {
@@ -492,21 +522,37 @@ public class TradeAnalysisService {
         return Optional.of(new TradeDetection(direction, tradeAmount, totalIn, totalOut));
     }
 
-    private Optional<TokenFlow> analyseSwapLog(String topic0, Log entry, List<String> topics) {
+    /**
+     * 分析 Swap 事件，计算目标代币的输入额（delta）
+     * 正数表示买入（收到代币），负数表示卖出（付出代币）
+     *
+     * @param topic0 Swap 事件签名
+     * @param entry  日志条目
+     * @param topics 主题列表
+     * @return 目标代币的输入额（delta），正数=买入，负数=卖出
+     */
+    private Optional<BigInteger> analyseSwapForTargetToken(String topic0, Log entry, List<String> topics) {
+        // 获取池子元数据
         Optional<DexPriceService.PairMetadata> metadataOpt = resolveSwapPairMetadata(topic0, entry, topics);
         if (!metadataOpt.isPresent()) {
             return Optional.empty();
         }
         DexPriceService.PairMetadata metadata = metadataOpt.get();
+        
+        // 判断目标代币是 token0 还是 token1（根据地址大小排序）
         String token0 = normalizeAddress(metadata.token0);
         String token1 = normalizeAddress(metadata.token1);
-        boolean trackToken0 = tokenAddress.equalsIgnoreCase(token0);
-        boolean trackToken1 = tokenAddress.equalsIgnoreCase(token1);
-        if (!trackToken0 && !trackToken1) {
+        String targetTokenNormalized = normalizeAddress(tokenAddress);
+        boolean isToken0 = targetTokenNormalized.equals(token0);
+        boolean isToken1 = targetTokenNormalized.equals(token1);
+        
+        if (!isToken0 && !isToken1) {
             return Optional.empty();
         }
 
-        BigInteger traderDelta;
+        BigInteger targetTokenDelta;
+        
+        // V2 Swap 事件处理
         if (SWAP_EVENT_SIGNATURE_V2_NORMALIZED.equals(topic0)) {
             List<Type> decoded = decodeEventData(entry.getData(), SWAP_EVENT_V2.getNonIndexedParameters());
             if (decoded.size() < 4) {
@@ -516,10 +562,16 @@ public class TradeAnalysisService {
             BigInteger amount1In = ((Uint256) decoded.get(1)).getValue();
             BigInteger amount0Out = ((Uint256) decoded.get(2)).getValue();
             BigInteger amount1Out = ((Uint256) decoded.get(3)).getValue();
-            traderDelta = trackToken0
-                    ? amount0Out.subtract(amount0In)
-                    : amount1Out.subtract(amount1In);
-        } else if (PANCAKE_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0) || UNISWAP_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0)) {
+            
+            // 目标代币的输入额 = 输出 - 输入（正数=买入，负数=卖出）
+            if (isToken0) {
+                targetTokenDelta = amount0Out.subtract(amount0In);
+            } else {
+                targetTokenDelta = amount1Out.subtract(amount1In);
+            }
+        }
+        // V3 Swap 事件处理
+        else if (PANCAKE_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0) || UNISWAP_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0)) {
             List<TypeReference<Type>> parameters = PANCAKE_EVENT_SIGNATURE_V3_NORMALIZED.equals(topic0)
                     ? PANCAKE_EVENT_V3.getNonIndexedParameters()
                     : UNISWAP_EVENT_V3.getNonIndexedParameters();
@@ -529,9 +581,15 @@ public class TradeAnalysisService {
             }
             BigInteger amount0 = ((Int256) decoded.get(0)).getValue();
             BigInteger amount1 = ((Int256) decoded.get(1)).getValue();
-            BigInteger poolDelta = trackToken0 ? amount0 : amount1;
-            traderDelta = poolDelta.negate();
-        } else if (PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0) || UNISWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0)) {
+            
+            // V3 中 amount0/amount1 是池子的变化量（正数=池子增加，负数=池子减少）
+            // 交易者的变化量 = -池子的变化量
+            // 正数=买入（交易者收到），负数=卖出（交易者付出）
+            BigInteger poolDelta = isToken0 ? amount0 : amount1;
+            targetTokenDelta = poolDelta.negate();
+        }
+        // V4 Swap 事件处理
+        else if (PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0) || UNISWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0)) {
             List<TypeReference<Type>> parameters = PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0)
                     ? PANCAKESWAP_EVENT_V4.getNonIndexedParameters()
                     : UNISWAP_EVENT_V4.getNonIndexedParameters();
@@ -541,18 +599,17 @@ public class TradeAnalysisService {
             }
             BigInteger amount0 = ((Int128) decoded.get(0)).getValue();
             BigInteger amount1 = ((Int128) decoded.get(1)).getValue();
-            BigInteger poolDelta = trackToken0 ? amount0 : amount1;
-            traderDelta = poolDelta.negate();
+            
+            // V4 中 amount0/amount1 是池子的变化量（正数=池子增加，负数=池子减少）
+            // 交易者的变化量 = -池子的变化量
+            // 正数=买入（交易者收到），负数=卖出（交易者付出）
+            BigInteger poolDelta = isToken0 ? amount0 : amount1;
+            targetTokenDelta = poolDelta.negate();
         } else {
             return Optional.empty();
         }
 
-        BigInteger received = traderDelta.signum() > 0 ? traderDelta : BigInteger.ZERO;
-        BigInteger sent = traderDelta.signum() < 0 ? traderDelta.negate() : BigInteger.ZERO;
-        if (received.signum() == 0 && sent.signum() == 0) {
-            return Optional.empty();
-        }
-        return Optional.of(new TokenFlow(received, sent));
+        return Optional.of(targetTokenDelta);
     }
 
     private Optional<DexPriceService.PairMetadata> resolveSwapPairMetadata(String topic0, Log entry, List<String> topics) {
@@ -904,3 +961,4 @@ public class TradeAnalysisService {
         }
     }
 }
+

@@ -1373,6 +1373,34 @@ public class DexPriceService {
     }
 
     /**
+     * 检查地址是否是缓存的 V2/V3 池子地址
+     *
+     * @param address 池子地址
+     * @return 是否是缓存的池子地址
+     */
+    public boolean isCachedPoolAddress(String address) {
+        if (address == null) {
+            return false;
+        }
+        PairMetadata metadata = pairCacheByAddress.get(normalize(address));
+        return metadata != null && (metadata.poolType == PoolType.V2 || metadata.poolType == PoolType.V3);
+    }
+
+    /**
+     * 检查 poolId 是否是缓存的 V4 池子 ID
+     *
+     * @param poolId 池子 ID
+     * @return 是否是缓存的 V4 池子 ID
+     */
+    public boolean isCachedV4PoolId(String poolId) {
+        if (poolId == null) {
+            return false;
+        }
+        PairMetadata metadata = pairCacheByAddress.get(normalize(poolId));
+        return metadata != null && metadata.poolType == PoolType.V4;
+    }
+
+    /**
      * 缓存池子元数据
      *
      * @param metadata      元数据

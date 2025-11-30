@@ -240,6 +240,10 @@ public class LiquidityMonitorService {
                     subscribeMint(pool, MINT_EVENT_V3);
                     subscribeBurn(pool, BURN_EVENT_V3);
                 });
+        tradeAnalysisService.start();
+        log.info("交易分析服务已启动");
+        priceService.initializePriceSampler();
+        log.info("价格采样器已初始化");
     }
 
     /**
@@ -1126,6 +1130,7 @@ public class LiquidityMonitorService {
 
     /**
      * 构建 V4 专用的 PairMetadata
+     * 确保 currency0 < currency1（按地址大小排序）
      */
     private DexPriceService.PairMetadata buildV4PairMetadata(V4PoolMetadata metadata,
                                                              BigInteger decimals0,
@@ -1134,17 +1139,47 @@ public class LiquidityMonitorService {
         if (metadata == null) {
             return null;
         }
-        BigInteger safeDecimals0 = decimals0 != null ? decimals0 : BigInteger.valueOf(18);
-        BigInteger safeDecimals1 = decimals1 != null ? decimals1 : BigInteger.valueOf(18);
+        
+        // 确保 currency0 < currency1（按地址大小排序）
+        String currency0 = normalizeAddress(metadata.currency0);
+        String currency1 = normalizeAddress(metadata.currency1);
+        String token0;
+        String token1;
+        BigInteger token0Decimals;
+        BigInteger token1Decimals;
+        String token0Symbol;
+        String token1Symbol;
+        
+        // 比较地址大小，确保 token0 < token1
+        if (currency0.compareTo(currency1) <= 0) {
+            // 已经正确排序
+            token0 = currency0;
+            token1 = currency1;
+            token0Decimals = decimals0;
+            token1Decimals = decimals1;
+            token0Symbol = metadata.currency0Symbol;
+            token1Symbol = metadata.currency1Symbol;
+        } else {
+            // 需要交换位置
+            token0 = currency1;
+            token1 = currency0;
+            token0Decimals = decimals1;
+            token1Decimals = decimals0;
+            token0Symbol = metadata.currency1Symbol;
+            token1Symbol = metadata.currency0Symbol;
+        }
+        
+        BigInteger safeDecimals0 = token0Decimals != null ? token0Decimals : BigInteger.valueOf(18);
+        BigInteger safeDecimals1 = token1Decimals != null ? token1Decimals : BigInteger.valueOf(18);
         String swapName = resolveV4SwapName(metadata);
         return new DexPriceService.PairMetadata(
                 metadata.poolId,
-                metadata.currency0,
-                metadata.currency1,
+                token0,
+                token1,
                 safeDecimals0,
                 safeDecimals1,
-                metadata.currency0Symbol,
-                metadata.currency1Symbol,
+                token0Symbol,
+                token1Symbol,
                 poolType,
                 metadata.fee,
                 metadata.manager,
