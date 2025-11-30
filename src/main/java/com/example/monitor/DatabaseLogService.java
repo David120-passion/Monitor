@@ -1,6 +1,6 @@
 package com.example.monitor;
 
-import org.h2.jdbcx.JdbcDataSource;
+import com.mysql.cj.jdbc.MysqlDataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -13,39 +13,77 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 
 /**
- * 简单的数据库日志服务，负责将关键业务日志写入 H2 数据库。
+ * 简单的数据库日志服务，负责将关键业务日志写入 MySQL 数据库。
  */
 public class DatabaseLogService {
     /** 日志记录器 */
     private static final Logger log = LoggerFactory.getLogger(DatabaseLogService.class);
     /** 数据源 */
     private final DataSource dataSource;
+    /** 异步执行数据库操作的线程池 */
+    private final ExecutorService dbExecutor;
 
     /**
-     * 使用默认账号密码初始化 H2 数据库。
+     * 使用默认连接信息初始化 MySQL 数据库。
      *
-     * @param url 数据库连接 URL
-     */
-    public DatabaseLogService(String url) {
-        this(url, "sa", "");
-    }
-
-    /**
-     * 指定连接信息初始化 H2 数据库。
-     *
-     * @param url      数据库连接 URL
+     * @param host     数据库主机地址
+     * @param port     数据库端口
+     * @param database 数据库名称
      * @param username 用户名
      * @param password 密码
      */
-    public DatabaseLogService(String url, String username, String password) {
-        JdbcDataSource ds = new JdbcDataSource();
-        ds.setURL(url);
-        ds.setUser(username);
-        ds.setPassword(password);
+    public DatabaseLogService(String host, int port, String database, String username, String password) {
+        MysqlDataSource ds = new MysqlDataSource();
+        try {
+            ds.setServerName(host);
+            ds.setPortNumber(port);
+            ds.setDatabaseName(database);
+            ds.setUser(username);
+            ds.setPassword(password);
+            ds.setUseSSL(false);
+            ds.setAllowPublicKeyRetrieval(true);
+            ds.setServerTimezone("UTC");
+        } catch (SQLException ex) {
+            log.error("Failed to configure MySQL data source", ex);
+            throw new RuntimeException("Failed to initialize database connection", ex);
+        }
         this.dataSource = ds;
+        this.dbExecutor = Executors.newFixedThreadPool(4, new ThreadFactory() {
+            private int counter = 0;
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r, "db-log-writer-" + (++counter));
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
         initializeSchema();
+    }
+
+    /**
+     * 关闭数据库服务，优雅关闭线程池
+     */
+    public void shutdown() {
+        if (dbExecutor != null && !dbExecutor.isShutdown()) {
+            dbExecutor.shutdown();
+            try {
+                if (!dbExecutor.awaitTermination(10, TimeUnit.SECONDS)) {
+                    dbExecutor.shutdownNow();
+                    if (!dbExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
+                        log.warn("Database executor did not terminate gracefully");
+                    }
+                }
+            } catch (InterruptedException e) {
+                dbExecutor.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
+        }
     }
 
     /**
@@ -55,7 +93,7 @@ public class DatabaseLogService {
         try (Connection connection = dataSource.getConnection();
              Statement statement = connection.createStatement()) {
             statement.execute("CREATE TABLE IF NOT EXISTS pair_created_logs (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "pair_address VARCHAR(128) NOT NULL, " +
                     "swap VARCHAR(128), " +
                     "name VARCHAR(256), " +
@@ -66,7 +104,7 @@ public class DatabaseLogService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
             statement.execute("CREATE TABLE IF NOT EXISTS pool_created_logs (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "pool_address VARCHAR(128) NOT NULL, " +
                     "swap VARCHAR(128), " +
                     "name VARCHAR(256), " +
@@ -78,7 +116,7 @@ public class DatabaseLogService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
             statement.execute("CREATE TABLE IF NOT EXISTS v4_initialize_logs (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "pool_id VARCHAR(256) NOT NULL, " +
                     "swap VARCHAR(128), " +
                     "name VARCHAR(256), " +
@@ -93,7 +131,7 @@ public class DatabaseLogService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
             statement.execute("CREATE TABLE IF NOT EXISTS v4_modify_liquidity_logs (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "pool_id VARCHAR(256) NOT NULL, " +
                     "action VARCHAR(64) NOT NULL, " +
                     "swap VARCHAR(128), " +
@@ -103,8 +141,8 @@ public class DatabaseLogService {
                     "liquidity_delta DECIMAL(50, 0), " +
                     "amount0_delta DECIMAL(38, 18), " +
                     "amount1_delta DECIMAL(38, 18), " +
-                    "price_range_lower DECIMAL(38, 18), " +
-                    "price_range_upper DECIMAL(38, 18), " +
+                    "price_range_lower DECIMAL(65, 18), " +
+                    "price_range_upper DECIMAL(65, 18), " +
                     "amount0_remaining DECIMAL(38, 18), " +
                     "amount1_remaining DECIMAL(38, 18), " +
                     "tvl_remaining DECIMAL(38, 18), " +
@@ -113,7 +151,7 @@ public class DatabaseLogService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
             statement.execute("CREATE TABLE IF NOT EXISTS burn_logs_v2 (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "pair_address VARCHAR(128) NOT NULL, " +
                     "name VARCHAR(256), " +
                     "sender VARCHAR(128), " +
@@ -126,13 +164,13 @@ public class DatabaseLogService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
             statement.execute("CREATE TABLE IF NOT EXISTS burn_logs_v3 (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "pool_address VARCHAR(128) NOT NULL, " +
                     "name VARCHAR(256), " +
                     "owner VARCHAR(128), " +
                     "fee INTEGER, " +
-                    "price_range_lower DECIMAL(38, 18), " +
-                    "price_range_upper DECIMAL(38, 18), " +
+                    "price_range_lower DECIMAL(65, 18), " +
+                    "price_range_upper DECIMAL(65, 18), " +
                     "token0 VARCHAR(128), " +
                     "token1 VARCHAR(128), " +
                     "burned_liquidity DECIMAL(50, 0), " +
@@ -142,7 +180,7 @@ public class DatabaseLogService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
             statement.execute("CREATE TABLE IF NOT EXISTS mint_logs_v2 (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "pair_address VARCHAR(128) NOT NULL, " +
                     "name VARCHAR(256), " +
                     "sender VARCHAR(128), " +
@@ -154,14 +192,14 @@ public class DatabaseLogService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
             statement.execute("CREATE TABLE IF NOT EXISTS mint_logs_v3 (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "pool_address VARCHAR(128) NOT NULL, " +
                     "name VARCHAR(256), " +
                     "sender VARCHAR(128), " +
                     "owner VARCHAR(128), " +
                     "fee INTEGER, " +
-                    "price_range_lower DECIMAL(38, 18), " +
-                    "price_range_upper DECIMAL(38, 18), " +
+                    "price_range_lower DECIMAL(65, 18), " +
+                    "price_range_upper DECIMAL(65, 18), " +
                     "token0 VARCHAR(128), " +
                     "token1 VARCHAR(128), " +
                     "amount0 DECIMAL(38, 18), " +
@@ -170,7 +208,7 @@ public class DatabaseLogService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
             statement.execute("CREATE TABLE IF NOT EXISTS trade_logs (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "tx_hash VARCHAR(128) NOT NULL, " +
                     "address VARCHAR(128) NOT NULL, " +
                     "action VARCHAR(32) NOT NULL, " +
@@ -192,23 +230,38 @@ public class DatabaseLogService {
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
             statement.execute("CREATE TABLE IF NOT EXISTS pool_registration_logs (" +
-                    "id IDENTITY PRIMARY KEY, " +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
                     "pair_address VARCHAR(128) NOT NULL, " +
                     "swap VARCHAR(128), " +
                     "name VARCHAR(256), " +
                     "fee INTEGER, " +
                     "amount0 DECIMAL(38, 18), " +
                     "amount1 DECIMAL(38, 18), " +
-                    "price_range_lower DECIMAL(38, 18), " +
-                    "price_range_upper DECIMAL(38, 18), " +
+                    "price_range_lower DECIMAL(65, 18), " +
+                    "price_range_upper DECIMAL(65, 18), " +
                     "tvl DECIMAL(38, 18), " +
                     "event_time TIMESTAMP, " +
                     "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
                     ")");
+            statement.execute("CREATE TABLE IF NOT EXISTS transfer_logs (" +
+                    "id BIGINT AUTO_INCREMENT PRIMARY KEY, " +
+                    "tx_hash VARCHAR(128) NOT NULL, " +
+                    "token_address VARCHAR(128) NOT NULL, " +
+                    "from_address VARCHAR(128) NOT NULL, " +
+                    "to_address VARCHAR(128) NOT NULL, " +
+                    "amount DECIMAL(38, 18) NOT NULL, " +
+                    "amount_raw DECIMAL(50, 0), " +
+                    "log_index INTEGER, " +
+                    "block_number BIGINT, " +
+                    "event_time TIMESTAMP, " +
+                    "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP" +
+                    ")");
+            
         } catch (SQLException ex) {
             log.error("Failed to initialise database schema", ex);
         }
     }
+
 
     public void logPairCreated(String pairAddress,
                                String swap,
@@ -503,32 +556,35 @@ public class DatabaseLogService {
         if (txHash == null || address == null || action == null) {
             return;
         }
-        String sql = "INSERT INTO trade_logs (tx_hash, address, action, amount, token_symbol, price, notional_value, total_buy_amount, total_sell_amount, total_buy_value, total_sell_value, net_amount, net_value, avg_buy_price, avg_sell_price, trade_count, block_number, event_time) " +
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
-        try (Connection connection = dataSource.getConnection();
-             PreparedStatement ps = connection.prepareStatement(sql)) {
-            ps.setString(1, txHash);
-            ps.setString(2, address);
-            ps.setString(3, action);
-            setBigDecimal(ps, 4, amount);
-            ps.setString(5, tokenSymbol);
-            setBigDecimal(ps, 6, price);
-            setBigDecimal(ps, 7, notionalValue);
-            setBigDecimal(ps, 8, totalBuyAmount);
-            setBigDecimal(ps, 9, totalSellAmount);
-            setBigDecimal(ps, 10, totalBuyValue);
-            setBigDecimal(ps, 11, totalSellValue);
-            setBigDecimal(ps, 12, netAmount);
-            setBigDecimal(ps, 13, netValue);
-            setBigDecimal(ps, 14, avgBuyPrice);
-            setBigDecimal(ps, 15, avgSellPrice);
-            setInteger(ps, 16, tradeCount);
-            setBigInteger(ps, 17, blockNumber);
-            setTimestamp(ps, 18, eventTime);
-            ps.executeUpdate();
-        } catch (SQLException ex) {
-            log.error("Failed to persist trade log for {}", txHash, ex);
-        }
+        // 异步执行数据库操作
+        dbExecutor.execute(() -> {
+            String sql = "INSERT INTO trade_logs (tx_hash, address, action, amount, token_symbol, price, notional_value, total_buy_amount, total_sell_amount, total_buy_value, total_sell_value, net_amount, net_value, avg_buy_price, avg_sell_price, trade_count, block_number, event_time) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement ps = connection.prepareStatement(sql)) {
+                ps.setString(1, txHash);
+                ps.setString(2, address);
+                ps.setString(3, action);
+                setBigDecimal(ps, 4, amount);
+                ps.setString(5, tokenSymbol);
+                setBigDecimal(ps, 6, price);
+                setBigDecimal(ps, 7, notionalValue);
+                setBigDecimal(ps, 8, totalBuyAmount);
+                setBigDecimal(ps, 9, totalSellAmount);
+                setBigDecimal(ps, 10, totalBuyValue);
+                setBigDecimal(ps, 11, totalSellValue);
+                setBigDecimal(ps, 12, netAmount);
+                setBigDecimal(ps, 13, netValue);
+                setBigDecimal(ps, 14, avgBuyPrice);
+                setBigDecimal(ps, 15, avgSellPrice);
+                setInteger(ps, 16, tradeCount);
+                setBigInteger(ps, 17, blockNumber);
+                setTimestamp(ps, 18, eventTime);
+                ps.executeUpdate();
+            } catch (SQLException ex) {
+                log.error("Failed to persist trade log for {}", txHash, ex);
+            }
+        });
     }
 
     public void logPoolRegistration(String pairAddress,
@@ -562,6 +618,53 @@ public class DatabaseLogService {
         } catch (SQLException ex) {
             log.error("Failed to persist pool registration log for {}", pairAddress, ex);
         }
+    }
+
+    /**
+     * 记录 Transfer 事件（异步执行）
+     *
+     * @param txHash       交易哈希
+     * @param tokenAddress 代币地址
+     * @param fromAddress  发送方地址
+     * @param toAddress    接收方地址
+     * @param amount       转账金额（已转换精度）
+     * @param amountRaw    原始金额（未转换精度）
+     * @param logIndex     日志索引
+     * @param blockNumber  区块号
+     * @param eventTime    事件时间
+     */
+    public void logTransfer(String txHash,
+                           String tokenAddress,
+                           String fromAddress,
+                           String toAddress,
+                           BigDecimal amount,
+                           BigInteger amountRaw,
+                           Integer logIndex,
+                           BigInteger blockNumber,
+                           Instant eventTime) {
+        if (txHash == null || tokenAddress == null || fromAddress == null || toAddress == null || amount == null) {
+            return;
+        }
+        // 异步执行数据库操作
+        dbExecutor.execute(() -> {
+            String sql = "INSERT INTO transfer_logs (tx_hash, token_address, from_address, to_address, amount, amount_raw, log_index, block_number, event_time) " +
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
+            try (Connection connection = dataSource.getConnection();
+                 PreparedStatement ps = connection.prepareStatement(sql)) {
+                ps.setString(1, txHash);
+                ps.setString(2, tokenAddress);
+                ps.setString(3, fromAddress);
+                ps.setString(4, toAddress);
+                setBigDecimal(ps, 5, amount);
+                setBigInteger(ps, 6, amountRaw);
+                setInteger(ps, 7, logIndex);
+                setBigInteger(ps, 8, blockNumber);
+                setTimestamp(ps, 9, eventTime);
+                ps.executeUpdate();
+            } catch (SQLException ex) {
+                log.error("Failed to persist transfer log for tx {}", txHash, ex);
+            }
+        });
     }
 
     private void setBigInteger(PreparedStatement ps, int index, BigInteger value) throws SQLException {

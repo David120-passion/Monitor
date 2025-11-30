@@ -11,7 +11,7 @@
 
 ## 快速开始
 
-1. 安装 [Maven](https://maven.apache.org/) 和 JDK 17。
+1. 安装 [Maven](https://maven.apache.org/) 和 JDK 1.8。
 2. 编译项目：
    ```bash
    mvn clean package

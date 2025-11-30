@@ -11,7 +11,6 @@ import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.*;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
-import org.web3j.protocol.core.DefaultBlockParameterName;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.EthBlock;
 import org.web3j.protocol.core.methods.response.Log;
@@ -266,18 +265,14 @@ public class TradeAnalysisService {
      * 启动监听
      */
     public void start() {
-//        BigInteger startBlock = BigInteger.valueOf(
-//                63654079
-//        );
-//        BigInteger endBlock = BigInteger.valueOf(
-//                63654081
-//        );
-//        EthFilter filter = new EthFilter(
-//                DefaultBlockParameter.valueOf(startBlock),
-//                DefaultBlockParameter.valueOf(endBlock), // 一直扫描到最新区块
-//                tokenAddress);
-
-        EthFilter filter = new EthFilter(DefaultBlockParameterName.LATEST, DefaultBlockParameterName.LATEST, tokenAddress);
+        BigInteger startBlock = BigInteger.valueOf(69868998
+        );
+        BigInteger endBlock = BigInteger.valueOf(69868999
+        );
+        EthFilter filter = new EthFilter(
+                DefaultBlockParameter.valueOf(startBlock),
+                DefaultBlockParameter.valueOf(endBlock),
+                tokenAddress);
         filter.addSingleTopic(EventEncoder.encode(TRANSFER_EVENT));
         web3j.ethLogFlowable(filter).subscribe(this::handleTransferLog, throwable ->
                 log.error("Error processing trade analysis transfer log", throwable));
@@ -291,6 +286,9 @@ public class TradeAnalysisService {
     private void handleTransferLog(Log logEntry) {
         try {
             String txHash = logEntry.getTransactionHash();
+//            if(!txHash.equals("0xf7bd5697cd8c64ede564776cd58e54f5ca7fc39408f3574e130ca1776b94cd53")){
+//                return;
+//            }
             if (txHash == null || txHash.isEmpty()) {
                 return;
             }
@@ -317,6 +315,9 @@ public class TradeAnalysisService {
             if (receipt.getLogs() == null || receipt.getLogs().isEmpty()) {
                 return;
             }
+
+            // 存储所有目标代币的 Transfer 事件
+            storeTransferEvents(receipt.getLogs(), txHash, logEntry.getBlockNumber());
 
             Optional<TradeDetection> detectionOpt = analyseTransactionLogs(txFromNormalized, receipt.getLogs(),txHash);
             if (!detectionOpt.isPresent()) {
@@ -774,6 +775,68 @@ public class TradeAnalysisService {
             clean = String.format("%40s", clean).replace(' ', '0');
         }
         return "0x" + clean.substring(clean.length() - 40);
+    }
+
+    /**
+     * 存储所有目标代币的 Transfer 事件
+     *
+     * @param logs        交易所有日志
+     * @param txHash      交易哈希
+     * @param blockNumber 区块号
+     */
+    private void storeTransferEvents(List<Log> logs, String txHash, BigInteger blockNumber) {
+        if (databaseLogService == null || logs == null || logs.isEmpty()) {
+            return;
+        }
+
+        Optional<Long> timestampOpt = blockNumber != null ? fetchBlockTimestamp(blockNumber) : Optional.empty();
+        Instant eventTime = timestampOpt.isPresent() ? Instant.ofEpochMilli(timestampOpt.get()) : Instant.now();
+
+        for (Log entry : logs) {
+            // 只处理目标代币的 Transfer 事件
+            if (!tokenAddress.equalsIgnoreCase(entry.getAddress())) {
+                continue;
+            }
+
+            List<String> topics = entry.getTopics();
+            if (topics == null || topics.isEmpty()) {
+                continue;
+            }
+            String topic0 = topics.get(0).toLowerCase(Locale.ROOT);
+            if (!TRANSFER_EVENT_SIGNATURE.equals(topic0)) {
+                continue;
+            }
+            if (topics.size() < 3) {
+                continue;
+            }
+
+            String from = decodeAddress(topics.get(1));
+            String to = decodeAddress(topics.get(2));
+            List<Type> decoded = FunctionReturnDecoder.decode(entry.getData(), TRANSFER_EVENT.getNonIndexedParameters());
+            if (decoded.isEmpty()) {
+                continue;
+            }
+
+            BigInteger valueRaw = (BigInteger) decoded.get(0).getValue();
+            if (valueRaw == null) {
+                continue;
+            }
+
+            BigDecimal amount = toDecimalAmount(valueRaw);
+            Integer logIndex = entry.getLogIndex() != null ? entry.getLogIndex().intValue() : null;
+
+            databaseLogService.logTransfer(
+                    txHash,
+                    entry.getAddress(),
+                    from,
+                    to,
+                    amount,
+                    valueRaw,
+                    logIndex,
+                    blockNumber,
+                    eventTime
+            );
+        }
     }
 
     /** 交易方向 */
