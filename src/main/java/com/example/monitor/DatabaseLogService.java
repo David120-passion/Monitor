@@ -8,11 +8,18 @@ import javax.sql.DataSource;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -64,6 +71,143 @@ public class DatabaseLogService {
             }
         });
         initializeSchema();
+    }
+
+    /**
+     * 归档所有表并清空原表
+     * 在每次启动时调用，将现有数据归档到带时间戳的表中，然后清空原表
+     */
+    public void archiveAndClearAllTables() {
+        try (Connection connection = dataSource.getConnection();
+             Statement statement = connection.createStatement()) {
+            
+            // 获取所有需要归档的表名
+            List<String> tablesToArchive = getTablesToArchive(connection);
+            
+            if (tablesToArchive.isEmpty()) {
+                log.info("没有需要归档的表");
+                return;
+            }
+            
+            // 生成归档表名的时间戳后缀（格式：2025-12-09_19-14）
+            String timestampSuffix = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm"));
+            
+            log.info("开始归档 {} 个表，时间戳后缀: {}", tablesToArchive.size(), timestampSuffix);
+            
+            int successCount = 0;
+            int failCount = 0;
+            
+            for (String tableName : tablesToArchive) {
+                try {
+                    // 检查表是否存在且有数据
+                    if (!tableExists(connection, tableName)) {
+                        log.debug("表 {} 不存在，跳过", tableName);
+                        continue;
+                    }
+                    
+                    long rowCount = getTableRowCount(connection, tableName);
+                    if (rowCount == 0) {
+                        log.debug("表 {} 为空，跳过归档", tableName);
+                        continue;
+                    }
+                    
+                    // 生成归档表名（例如：2025-12-09_19-14-pair_created_logs）
+                    String archiveTableName = timestampSuffix + "-" + tableName;
+                    
+                    // 创建归档表（复制表结构）
+                    String createArchiveTableSql = String.format(
+                        "CREATE TABLE IF NOT EXISTS `%s` LIKE `%s`",
+                        archiveTableName, tableName
+                    );
+                    statement.execute(createArchiveTableSql);
+                    log.debug("创建归档表: {}", archiveTableName);
+                    
+                    // 复制数据到归档表
+                    String copyDataSql = String.format(
+                        "INSERT INTO `%s` SELECT * FROM `%s`",
+                        archiveTableName, tableName
+                    );
+                    int copiedRows = statement.executeUpdate(copyDataSql);
+                    log.info("表 {} 归档完成: {} 行数据已复制到 {}", tableName, copiedRows, archiveTableName);
+                    
+                    // 清空原表
+                    String truncateSql = String.format("TRUNCATE TABLE `%s`", tableName);
+                    statement.execute(truncateSql);
+                    log.info("表 {} 已清空", tableName);
+                    
+                    successCount++;
+                    
+                } catch (SQLException e) {
+                    log.error("归档表 {} 失败", tableName, e);
+                    failCount++;
+                }
+            }
+            
+            log.info("表归档完成: 成功 {} 个，失败 {} 个", successCount, failCount);
+            
+        } catch (SQLException e) {
+            log.error("归档表时发生错误", e);
+        }
+    }
+    
+    /**
+     * 获取需要归档的表名列表
+     */
+    private List<String> getTablesToArchive(Connection connection) {
+        // 定义所有需要归档的表名
+        List<String> tables = Arrays.asList(
+            "pair_created_logs",
+            "pool_created_logs",
+            "v4_initialize_logs",
+            "v4_modify_liquidity_logs",
+            "burn_logs_v2",
+            "burn_logs_v3",
+            "mint_logs_v2",
+            "mint_logs_v3",
+            "trade_logs",
+            "pool_registration_logs",
+            "transfer_logs"
+        );
+        
+        // 过滤出实际存在的表
+        List<String> existingTables = new ArrayList<>();
+        for (String table : tables) {
+            if (tableExists(connection, table)) {
+                existingTables.add(table);
+            }
+        }
+        
+        return existingTables;
+    }
+    
+    /**
+     * 检查表是否存在
+     */
+    private boolean tableExists(Connection connection, String tableName) {
+        try {
+            DatabaseMetaData metaData = connection.getMetaData();
+            try (ResultSet rs = metaData.getTables(null, null, tableName, new String[]{"TABLE"})) {
+                return rs.next();
+            }
+        } catch (SQLException e) {
+            log.error("检查表是否存在时出错: {}", tableName, e);
+            return false;
+        }
+    }
+    
+    /**
+     * 获取表的行数
+     */
+    private long getTableRowCount(Connection connection, String tableName) {
+        try (Statement stmt = connection.createStatement();
+             ResultSet rs = stmt.executeQuery("SELECT COUNT(*) FROM `" + tableName + "`")) {
+            if (rs.next()) {
+                return rs.getLong(1);
+            }
+        } catch (SQLException e) {
+            log.error("获取表 {} 行数时出错", tableName, e);
+        }
+        return 0;
     }
 
     /**
@@ -705,6 +849,80 @@ public class DatabaseLogService {
         } else {
             ps.setTimestamp(index, Timestamp.from(instant));
         }
+    }
+
+    /**
+     * V4 池子初始化数据
+     */
+    public static class V4InitializeData {
+        public final String poolId;
+        public final String swap;
+        public final String name;
+        public final String currency0;
+        public final String currency1;
+        public final BigInteger fee;
+        public final String hooks;
+
+        public V4InitializeData(String poolId, String swap, String name, String currency0, String currency1,
+                                BigInteger fee, String hooks) {
+            this.poolId = poolId;
+            this.swap = swap;
+            this.name = name;
+            this.currency0 = currency0;
+            this.currency1 = currency1;
+            this.fee = fee;
+            this.hooks = hooks;
+        }
+    }
+
+    /**
+     * 从数据库加载所有 V4 池子的初始化数据
+     *
+     * @param targetTokenAddress 目标代币地址（可选，如果提供则只加载包含该代币的池子）
+     * @return V4 池子初始化数据列表
+     */
+    public List<V4InitializeData> loadV4InitializeData(String targetTokenAddress) {
+        List<V4InitializeData> results = new ArrayList<>();
+        String sql;
+        
+        if (targetTokenAddress != null && !targetTokenAddress.isEmpty()) {
+            // 如果提供了目标代币地址，只加载包含该代币的池子
+            sql = "SELECT DISTINCT pool_id, swap, name, currency0, currency1, fee, hooks " +
+                    "FROM v4_initialize_logs " +
+                    "WHERE LOWER(currency0) = LOWER(?) OR LOWER(currency1) = LOWER(?) " +
+                    "ORDER BY event_time DESC";
+        } else {
+            // 加载所有池子
+            sql = "SELECT DISTINCT pool_id, swap, name, currency0, currency1, fee, hooks " +
+                    "FROM v4_initialize_logs " +
+                    "ORDER BY event_time DESC";
+        }
+        
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (targetTokenAddress != null && !targetTokenAddress.isEmpty()) {
+                statement.setString(1, targetTokenAddress);
+                statement.setString(2, targetTokenAddress);
+            }
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    String poolId = rs.getString("pool_id");
+                    String swap = rs.getString("swap");
+                    String name = rs.getString("name");
+                    String currency0 = rs.getString("currency0");
+                    String currency1 = rs.getString("currency1");
+                    BigInteger fee = rs.getObject("fee") != null ? BigInteger.valueOf(rs.getInt("fee")) : null;
+                    String hooks = rs.getString("hooks");
+                    
+                    if (poolId != null && currency0 != null && currency1 != null) {
+                        results.add(new V4InitializeData(poolId, swap, name, currency0, currency1, fee, hooks));
+                    }
+                }
+            }
+        } catch (SQLException ex) {
+            log.error("Failed to load V4 initialize data from database", ex);
+        }
+        return results;
     }
 }
 

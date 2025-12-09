@@ -26,6 +26,7 @@ import org.web3j.protocol.core.methods.response.EthLog;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
 import org.web3j.utils.Numeric;
 
+import javax.security.sasl.SaslServer;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -34,13 +35,22 @@ import java.math.RoundingMode;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 /**
@@ -79,6 +89,22 @@ public class LiquidityMonitorService {
     private final ConcurrentHashMap<BigInteger, Instant> blockTimestampCache = new ConcurrentHashMap<>();
     /** 代币创建区块 */
     private final BigInteger tokenCreationBlock;
+    /** 是否从数据库加载历史数据 */
+    private final boolean loadHistoryFromDatabase;
+    /** V4 工厂订阅完成计数器 */
+    private CountDownLatch v4FactorySubscriptionLatch;
+    /** V4 工厂订阅执行器 */
+    private ExecutorService v4SubscriptionExecutor;
+    /** V4 ModifyLiquidity 定时拉取执行器 */
+    private ScheduledExecutorService v4ModifyLiquidityScheduler;
+    /** V4 ModifyLiquidity 定时拉取任务 */
+    private ScheduledFuture<?> v4ModifyLiquidityTask;
+    /** V4 工厂上次查询区块号（key: factoryAddress） */
+    private final ConcurrentHashMap<String, BigInteger> v4FactoryLastBlockMap = new ConcurrentHashMap<>();
+    /** V4 池子工厂地址映射（key: poolId, value: factoryAddress） */
+    private final ConcurrentHashMap<String, String> v4PoolFactoryMap = new ConcurrentHashMap<>();
+    /** ModifyLiquidity 定时拉取间隔（秒） */
+    private static final long MODIFY_LIQUIDITY_POLL_INTERVAL_SECONDS = 10L;
     /** 日志查询单次最大区块跨度 */
     private static final BigInteger MAX_LOG_BLOCK_RANGE = BigInteger.valueOf(50_000L);
     /** 价格计算精度 */
@@ -193,21 +219,84 @@ public class LiquidityMonitorService {
     public LiquidityMonitorService(Web3j web3j, String tokenAddress, DexPriceService priceService,
                                    TradeAnalysisService tradeAnalysisService, BigInteger tokenCreationBlock,
                                    DatabaseLogService databaseLogService) {
+        this(web3j, tokenAddress, priceService, tradeAnalysisService, tokenCreationBlock, databaseLogService, true);
+    }
+
+    /**
+     * 构造函数（带数据库加载配置）
+     */
+    public LiquidityMonitorService(Web3j web3j, String tokenAddress, DexPriceService priceService,
+                                   TradeAnalysisService tradeAnalysisService, BigInteger tokenCreationBlock,
+                                   DatabaseLogService databaseLogService, boolean loadHistoryFromDatabase) {
         this.web3j = web3j;
         this.tokenAddress = tokenAddress.toLowerCase();
         this.priceService = priceService;
         this.tradeAnalysisService = tradeAnalysisService;
         this.tokenCreationBlock = tokenCreationBlock;
         this.databaseLogService = databaseLogService;
+        this.loadHistoryFromDatabase = loadHistoryFromDatabase;
     }
 
     /**
      * 启动监听
      */
     public void start() {
+        // 如果启用从数据库加载历史数据，先加载
+        if (loadHistoryFromDatabase && databaseLogService != null) {
+            log.info("Loading historical V4 pool data from database...");
+            loadV4PoolsFromDatabase();
+            log.info("Historical V4 pool data loaded from database");
+        }
+        
         DexConstants.V2_FACTORIES.forEach(factory -> subscribeFactory(factory, PAIR_CREATED_EVENT));
         DexConstants.V3_FACTORIES.forEach(factory -> subscribeFactory(factory, POOL_CREATED_EVENT));
-        DexConstants.V4_FACTORIES.forEach(this::subscribeV4Factory);
+        
+        // 初始化 V4 工厂订阅等待机制
+        int v4FactoryCount = DexConstants.V4_FACTORIES.size();
+        v4FactorySubscriptionLatch = new CountDownLatch(v4FactoryCount);
+        v4SubscriptionExecutor = Executors.newFixedThreadPool(v4FactoryCount);
+        
+        // 异步订阅 V4 工厂，等待历史数据拉取完成
+        DexConstants.V4_FACTORIES.forEach(factory -> 
+            v4SubscriptionExecutor.submit(() -> {
+                try {
+                    subscribeV4Factory(factory);
+                } catch (Exception e) {
+                    log.error("Failed to subscribe V4 factory: {}", factory, e);
+                } finally {
+                    v4FactorySubscriptionLatch.countDown();
+                }
+            })
+        );
+        
+        // 等待所有 V4 工厂的历史订阅完成
+        try {
+            log.info("Waiting for V4 factory historical subscriptions to complete...");
+            v4FactorySubscriptionLatch.await();
+            log.info("All V4 factory historical subscriptions completed.");
+        } catch (InterruptedException e) {
+            log.error("Interrupted while waiting for V4 factory subscriptions", e);
+            Thread.currentThread().interrupt();
+        } finally {
+            if (v4SubscriptionExecutor != null) {
+                v4SubscriptionExecutor.shutdown();
+            }
+        }
+        
+
+
+        // 启动定时拉取modify任务
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                initializeV4ModifyLiquidityHistory();
+                startV4ModifyLiquidityPolling();
+            }
+        }).start();
+        priceService.initializePriceSampler();
+        log.info("价格采样器已初始化");
+        tradeAnalysisService.start();
+        System.out.println("交易分析服务初始化完毕");
     }
 
     /**
@@ -240,10 +329,9 @@ public class LiquidityMonitorService {
                     subscribeMint(pool, MINT_EVENT_V3);
                     subscribeBurn(pool, BURN_EVENT_V3);
                 });
-        tradeAnalysisService.start();
-        log.info("交易分析服务已启动");
-        priceService.initializePriceSampler();
-        log.info("价格采样器已初始化");
+//        tradeAnalysisService.start();
+//        log.info("交易分析服务已启动");
+
     }
 
     /**
@@ -265,6 +353,10 @@ public class LiquidityMonitorService {
      * @param factoryAddress 工厂合约地址
      */
     private void subscribeV4Factory(String factoryAddress) {
+        String factoryName = DexConstants.FACTORY_NAMES.getOrDefault(
+                normalizeAddress(factoryAddress), factoryAddress);
+        log.info("Starting V4 factory subscription for: {}", factoryName);
+        
         Event initEvent = resolveV4InitializeEvent(factoryAddress);
         DefaultBlockParameter subscriptionStart = prepareHistoricalSubscription(
                 factoryAddress,
@@ -277,6 +369,8 @@ public class LiquidityMonitorService {
         initFilter.addSingleTopic(EventEncoder.encode(initEvent));
         web3j.ethLogFlowable(initFilter).subscribe(logEntry -> handleV4InitializeLog(factoryAddress, logEntry), throwable ->
                 log.error("Error processing V4 initialize event", throwable));
+        
+        log.info("V4 factory subscription completed for: {} (historical data fetched up to latest block)", factoryName);
     }
 
     /**
@@ -521,39 +615,211 @@ public class LiquidityMonitorService {
                             timestamp);
                 }
             }
-            subscribeV4ModifyLiquidity(factoryAddress, poolIdTopic);
+            // 记录 poolId 和工厂地址的映射，用于后续定时拉取
+            v4PoolFactoryMap.put(normalizedPoolId, factoryAddress);
         } catch (Exception ex) {
             log.error("Failed to handle V4 initialize log", ex);
         }
     }
 
     /**
-     * 订阅 V4 ModifyLiquidity 事件
-     *
-     * @param factoryAddress 工厂地址
-     * @param poolIdTopic    池子 ID 主题
+     * 初始化所有 V4 poolId 的 ModifyLiquidity 历史数据
      */
-    private void subscribeV4ModifyLiquidity(String factoryAddress, String poolIdTopic) {
-        if (factoryAddress == null || poolIdTopic == null) {
+    private void initializeV4ModifyLiquidityHistory() {
+        log.info("Initializing V4 ModifyLiquidity history for {} pools", v4Pools.size());
+        
+        // 确定起始区块：如果从数据库加载历史数据，则从最新区块开始；否则从池子初始化区块开始
+        BigInteger startBlock;
+        if (loadHistoryFromDatabase) {
+            BigInteger latestBlock = fetchLatestBlockNumber();
+            startBlock = latestBlock != null ? latestBlock : BigInteger.ZERO;
+        } else {
+            // 从代币创建区块或最早区块开始
+            startBlock = tokenCreationBlock != null ? tokenCreationBlock : BigInteger.ZERO;
+        }
+        
+            // 拉取历史数据
+            BigInteger latestBlock = fetchLatestBlockNumber();
+
+
+        if (latestBlock == null || startBlock.compareTo(latestBlock) >= 0) {
+            // 如果没有历史数据需要拉取，记录当前区块号（按工厂）
+            for (String poolId : v4Pools.keySet()) {
+                String factoryAddress = v4PoolFactoryMap.get(poolId);
+                if (factoryAddress != null) {
+                    v4FactoryLastBlockMap.put(factoryAddress, latestBlock != null ? latestBlock : BigInteger.ZERO);
+                }
+            }
+            log.info("V4 ModifyLiquidity history initialization completed (no historical data to fetch)");
             return;
         }
-        String normalizedPoolId = normalizePoolId(poolIdTopic);
-        String normalizedKey = normalizeAddress(factoryAddress) + ":" + normalizedPoolId;
-        if (!v4SubscribedPools.add(normalizedKey)) {
-            return;
+            
+            // 按工厂地址分组 poolId
+            Map<String, List<String>> poolsByFactory = v4Pools.keySet().stream()
+                    .filter(poolId -> v4PoolFactoryMap.get(poolId) != null)
+                    .collect(Collectors.groupingBy(v4PoolFactoryMap::get));
+            
+            log.info("Grouped {} pools into {} factories for batch fetching", v4Pools.size(), poolsByFactory.size());
+            
+            // 对每个工厂，一次性拉取该工厂下所有 poolId 的历史数据
+            for (Map.Entry<String, List<String>> factoryEntry : poolsByFactory.entrySet()) {
+                String factoryAddress = factoryEntry.getKey();
+                List<String> poolIds = factoryEntry.getValue();
+                
+                log.info("Fetching historical ModifyLiquidity events for factory {} ({} pools)", factoryAddress, poolIds.size());
+                
+                // 一次性拉取该工厂下所有 poolId 的历史 ModifyLiquidity 事件
+                fetchHistoricalLogsInChunks(
+                        factoryAddress,
+                        MODIFY_LIQUIDITY_EVENT_V4,
+                        poolIds,
+                        this::handleV4ModifyLiquidityLog,
+                        "V4 modify liquidity (init)",
+                        startBlock,
+                        latestBlock
+                );
+                
+                // 记录工厂的最后查询区块号（所有 poolId 共享）
+                v4FactoryLastBlockMap.put(factoryAddress, latestBlock);
+            }
+        
+        log.info("V4 ModifyLiquidity history initialization completed for {} pools", v4Pools.size());
+    }
+    
+    /**
+     * 启动 V4 ModifyLiquidity 定时拉取任务
+     */
+    private void startV4ModifyLiquidityPolling() {
+        if (v4ModifyLiquidityScheduler == null) {
+            v4ModifyLiquidityScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "V4-ModifyLiquidity-Poller");
+                t.setDaemon(true);
+                return t;
+            });
         }
-        DefaultBlockParameter subscriptionStart = prepareHistoricalSubscription(
-                factoryAddress,
-                MODIFY_LIQUIDITY_EVENT_V4,
-                Collections.singletonList(normalizedPoolId),
-                this::handleV4ModifyLiquidityLog,
-                "V4 modify liquidity"
+        
+        v4ModifyLiquidityTask = v4ModifyLiquidityScheduler.scheduleWithFixedDelay(
+                this::pollV4ModifyLiquidityEvents,
+                0,
+                MODIFY_LIQUIDITY_POLL_INTERVAL_SECONDS,
+                TimeUnit.SECONDS
         );
-        EthFilter modifyFilter = new EthFilter(subscriptionStart, DefaultBlockParameterName.LATEST, factoryAddress);
-        modifyFilter.addSingleTopic(EventEncoder.encode(MODIFY_LIQUIDITY_EVENT_V4));
-        modifyFilter.addOptionalTopics(normalizedPoolId);
-        web3j.ethLogFlowable(modifyFilter).subscribe(logEntry -> handleV4ModifyLiquidityLog(logEntry), throwable ->
-                log.error("Error processing V4 modify liquidity event", throwable));
+        
+        log.info("V4 ModifyLiquidity polling task started (interval: {} seconds)", MODIFY_LIQUIDITY_POLL_INTERVAL_SECONDS);
+    }
+    
+    /**
+     * 定时拉取 V4 ModifyLiquidity 事件
+     */
+    private void pollV4ModifyLiquidityEvents() {
+        try {
+            BigInteger latestBlock = fetchLatestBlockNumber();
+            if (latestBlock == null) {
+                log.warn("Failed to fetch latest block number for V4 ModifyLiquidity polling");
+                return;
+            }
+            
+            // 按工厂地址分组所有 poolId
+            Map<String, List<String>> poolsByFactory = v4Pools.keySet().stream()
+                    .filter(poolId -> v4PoolFactoryMap.get(poolId) != null)
+                    .collect(Collectors.groupingBy(v4PoolFactoryMap::get));
+            
+            if (poolsByFactory.isEmpty()) {
+                return;
+            }
+            
+            int polledCount = 0;
+            
+            // 对每个工厂，一次性拉取该工厂下所有 poolId 的事件
+            for (Map.Entry<String, List<String>> factoryEntry : poolsByFactory.entrySet()) {
+                String factoryAddress = factoryEntry.getKey();
+                List<String> poolIds = factoryEntry.getValue();
+                
+                // 获取该工厂的上次查询区块号
+                BigInteger lastBlock = v4FactoryLastBlockMap.getOrDefault(factoryAddress, BigInteger.ZERO);
+                
+                // 如果上次查询的区块号已经是最新区块，跳过
+                if (lastBlock.compareTo(latestBlock) >= 0) {
+                    continue;
+                }
+                
+                // 从上次查询的区块+1开始，到最新区块，分段拉取
+                BigInteger currentStart = lastBlock.add(BigInteger.ONE);
+                BigInteger lastProcessedBlock = lastBlock;
+                
+                while (currentStart.compareTo(latestBlock) <= 0) {
+                    BigInteger endBlock = currentStart.add(MAX_LOG_BLOCK_RANGE).subtract(BigInteger.ONE);
+                    if (endBlock.compareTo(latestBlock) > 0) {
+                        endBlock = latestBlock;
+                    }
+                    
+                    // 一次性拉取该工厂下所有 poolId 的 ModifyLiquidity 事件
+                    EthFilter filter = new EthFilter(
+                            DefaultBlockParameter.valueOf(currentStart),
+                            DefaultBlockParameter.valueOf(endBlock),
+                            factoryAddress
+                    );
+                    filter.addSingleTopic(EventEncoder.encode(MODIFY_LIQUIDITY_EVENT_V4));
+                    // 添加多个 poolId 作为可选主题（OR 条件）
+//                    for (String poolId : poolIds) {
+                    if(poolIds != null && poolIds.size() != 0) {
+                        filter.addOptionalTopics(poolIds.toArray(new String[poolIds.size()]));
+                    }
+//                    }
+                    
+                    try {
+                        EthLog response = web3j.ethGetLogs(filter).send();
+                        if (response.hasError()) {
+                            log.warn("Failed to fetch V4 ModifyLiquidity logs for factory {} ({} pools, blocks {}-{}): {}", 
+                                    factoryAddress, poolIds.size(), currentStart, endBlock, response.getError());
+                            break; // 出错时停止拉取这个工厂
+                        }
+                        
+                        int eventCount = 0;
+                        for (EthLog.LogResult<?> logResult : response.getLogs()) {
+                            Object raw = logResult.get();
+                            if (raw instanceof Log) {
+                                handleV4ModifyLiquidityLog((Log) raw);
+                                eventCount++;
+                            }
+                        }
+                        
+                        if (eventCount > 0) {
+                            log.debug("Polled {} V4 ModifyLiquidity events for factory {} ({} pools, blocks {}-{})", 
+                                    eventCount, factoryAddress, poolIds.size(), currentStart, endBlock);
+                            polledCount += eventCount;
+                        }
+                        
+                        lastProcessedBlock = endBlock;
+                        
+                        // 如果已经到达最新区块，退出循环
+                        if (endBlock.compareTo(latestBlock) >= 0) {
+                            break;
+                        }
+                        
+                        // 继续下一段
+                        currentStart = endBlock.add(BigInteger.ONE);
+                        
+                    } catch (Exception e) {
+                        log.error("Error polling V4 ModifyLiquidity events for factory {} ({} pools, blocks {}-{})", 
+                                factoryAddress, poolIds.size(), currentStart, endBlock, e);
+                        break; // 出错时停止拉取这个工厂
+                    }
+                }
+                
+                // 更新工厂的最后查询区块号（所有 poolId 共享）
+                if (lastProcessedBlock.compareTo(lastBlock) > 0) {
+                    v4FactoryLastBlockMap.put(factoryAddress, lastProcessedBlock);
+                }
+            }
+            
+            if (polledCount > 0) {
+                log.debug("Polled total {} V4 ModifyLiquidity events from {} factories", polledCount, poolsByFactory.size());
+            }
+            
+        } catch (Exception e) {
+            log.error("Error in V4 ModifyLiquidity polling task", e);
+        }
     }
 
     /**
@@ -1202,6 +1468,85 @@ public class LiquidityMonitorService {
     }
 
     /**
+     * 从数据库加载 V4 池子数据到内存
+     */
+    private void loadV4PoolsFromDatabase() {
+        if (databaseLogService == null) {
+            log.warn("DatabaseLogService is null, cannot load V4 pools from database");
+            return;
+        }
+
+        List<DatabaseLogService.V4InitializeData> v4DataList = databaseLogService.loadV4InitializeData(tokenAddress);
+        log.info("Loaded {} V4 pool records from database for target token {}", v4DataList.size(), tokenAddress);
+
+        for (DatabaseLogService.V4InitializeData data : v4DataList) {
+            try {
+                // 检查是否包含目标代币
+                String normalizedCurrency0 = normalizeAddress(data.currency0);
+                String normalizedCurrency1 = normalizeAddress(data.currency1);
+                if (!matchesTarget(normalizedCurrency0, normalizedCurrency1)) {
+                    continue;
+                }
+
+                // 确定工厂地址（根据 swap 名称）
+                String factoryAddress = resolveFactoryAddressFromSwap(data.swap);
+                if (factoryAddress == null) {
+                    log.warn("Cannot resolve factory address for swap: {}, poolId: {}", data.swap, data.poolId);
+                    continue;
+                }
+
+                // 构建 V4 池子元数据
+                String normalizedPoolId = normalizePoolId(data.poolId);
+                V4PoolMetadata metadata = buildV4Metadata(
+                        factoryAddress,
+                        normalizedPoolId,
+                        normalizedCurrency0,
+                        normalizedCurrency1,
+                        data.fee,
+                        data.hooks
+                );
+
+                // 注册到缓存
+                V4PoolMetadata previous = v4Pools.putIfAbsent(normalizedPoolId, metadata);
+                if (previous == null) {
+                    // 获取代币精度
+                    BigInteger currency0Decimals = priceService.resolveTokenDecimals(normalizedCurrency0);
+                    BigInteger currency1Decimals = priceService.resolveTokenDecimals(normalizedCurrency1);
+                    
+                    // 注册到价格服务和交易分析服务
+                    registerV4PoolForTradeAnalysis(metadata, currency0Decimals, currency1Decimals);
+                    
+                    log.debug("Loaded V4 pool from database: poolId={}, swap={}, name={}", 
+                            normalizedPoolId, data.swap, data.name);
+                }
+            } catch (Exception e) {
+                log.error("Failed to load V4 pool from database: poolId={}", data.poolId, e);
+            }
+        }
+
+        log.info("Successfully loaded {} V4 pools from database into memory", v4Pools.size());
+    }
+
+    /**
+     * 根据 swap 名称解析工厂地址
+     */
+    private String resolveFactoryAddressFromSwap(String swap) {
+        if (swap == null) {
+            return null;
+        }
+        String normalizedSwap = swap.toLowerCase(Locale.ROOT);
+        for (String factory : DexConstants.V4_FACTORIES) {
+            String factoryName = DexConstants.FACTORY_NAMES.getOrDefault(
+                    normalizeAddress(factory), "").toLowerCase(Locale.ROOT);
+            if (normalizedSwap.contains(factoryName) || factoryName.contains(normalizedSwap)) {
+                return factory;
+            }
+        }
+        // 如果无法匹配，默认返回第一个 V4 工厂
+        return DexConstants.V4_FACTORIES.isEmpty() ? null : DexConstants.V4_FACTORIES.get(0);
+    }
+
+    /**
      * 计算 V4 池子的 TVL
      */
     private Optional<TvlInfo> calculateV4Tvl(V4PoolMetadata metadata, V4PoolState state) {
@@ -1262,6 +1607,10 @@ public class LiquidityMonitorService {
      * 获取 V4 订阅起始区块参数
      */
     private DefaultBlockParameter getV4StartBlockParameter() {
+        // 如果启用从数据库加载历史数据，则从最新区块开始订阅
+        if (loadHistoryFromDatabase) {
+            return DefaultBlockParameterName.LATEST;
+        }
         if (tokenCreationBlock != null && tokenCreationBlock.signum() >= 0) {
             return DefaultBlockParameter.valueOf(tokenCreationBlock);
         }
@@ -1277,16 +1626,25 @@ public class LiquidityMonitorService {
                                                                 Consumer<Log> handler,
                                                                 String context) {
         DefaultBlockParameter startParameter = getV4StartBlockParameter();
+        
+        // 如果启用从数据库加载历史数据，跳过历史数据拉取，直接从最新区块开始订阅
+        if (loadHistoryFromDatabase) {
+            log.info("Skipping historical data fetch for {} (using database data), starting from latest block", context);
+            return DefaultBlockParameterName.LATEST;
+        }
+        
         BigInteger startBlock = resolveStartBlock(startParameter);
         BigInteger latestBlock = fetchLatestBlockNumber();
         if (startBlock == null || latestBlock == null) {
             return startParameter;
         }
+        //todo 这里设定一个正常范围的值
         if (latestBlock.subtract(startBlock).compareTo(MAX_LOG_BLOCK_RANGE) <= 0) {
             return startParameter;
         }
         BigInteger nextStart = fetchHistoricalLogsInChunks(contractAddress, event, optionalTopics, handler, context,
                 startBlock, latestBlock);
+        System.out.println("v4池子初始化完毕");
         if (nextStart == null) {
             return startParameter;
         }
@@ -1345,7 +1703,8 @@ public class LiquidityMonitorService {
             );
             filter.addSingleTopic(eventTopic);
             if (optionalTopics != null && !optionalTopics.isEmpty()) {
-                filter.addOptionalTopics(optionalTopics.toArray(new String[0]));
+                // 添加多个可选主题（OR 条件）
+                    filter.addOptionalTopics(optionalTopics.toArray(new String[optionalTopics.size()]));
             }
             try {
                 EthLog response = web3j.ethGetLogs(filter).send();

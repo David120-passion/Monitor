@@ -11,10 +11,9 @@ import org.web3j.abi.datatypes.Type;
 import org.web3j.abi.datatypes.generated.*;
 import org.web3j.protocol.Web3j;
 import org.web3j.protocol.core.DefaultBlockParameter;
-import org.web3j.protocol.core.DefaultBlockParameterName;
-import org.web3j.protocol.core.DefaultBlockParameterNumber;
 import org.web3j.protocol.core.methods.request.EthFilter;
 import org.web3j.protocol.core.methods.response.EthBlock;
+import org.web3j.protocol.core.methods.response.EthLog;
 import org.web3j.protocol.core.methods.response.Log;
 import org.web3j.protocol.core.methods.response.Transaction;
 import org.web3j.protocol.core.methods.response.TransactionReceipt;
@@ -34,7 +33,15 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 买卖分析服务
@@ -235,6 +242,20 @@ public class TradeAnalysisService {
     private final BigDecimal decimalFactor;
     /** 已知的 V4 池子信息 */
     private final ConcurrentHashMap<String, DexPriceService.PairMetadata> v4Pools = new ConcurrentHashMap<>();
+    /** 区块时间戳缓存 */
+    private final ConcurrentHashMap<BigInteger, Long> blockTimestampCache = new ConcurrentHashMap<>();
+    /** 异步处理线程池 */
+    private final ExecutorService asyncExecutor;
+    /** Transfer 日志定时轮询执行器 */
+    private ScheduledExecutorService transferLogScheduler;
+    /** Transfer 日志定时轮询任务 */
+    private ScheduledFuture<?> transferLogTask;
+    /** 上次处理的区块号 */
+    private final AtomicReference<BigInteger> lastProcessedBlock = new AtomicReference<>();
+    /** Transfer 日志轮询间隔（秒） */
+    private static final long TRANSFER_LOG_POLL_INTERVAL_SECONDS = 10L;
+    /** 日志查询单次最大区块跨度 */
+    private static final BigInteger MAX_LOG_BLOCK_RANGE = BigInteger.valueOf(50_000L);
 
     /**
      * 构造函数
@@ -248,6 +269,16 @@ public class TradeAnalysisService {
         this.databaseLogService = databaseLogService;
         int decimals = tokenDecimals == null ? 18 : Math.max(tokenDecimals.intValue(), 0);
         this.decimalFactor = BigDecimal.TEN.pow(decimals);
+        this.asyncExecutor = Executors.newFixedThreadPool(5, r -> {
+            Thread thread = new Thread(r, "trade-analysis-async");
+            thread.setDaemon(true);
+            return thread;
+        });
+        this.transferLogScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread thread = new Thread(r, "trade-analysis-transfer-polling");
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 
     /**
@@ -265,24 +296,130 @@ public class TradeAnalysisService {
     }
 
     /**
-     * 启动监听
+     * 启动监听（定时轮询方式）
      */
     public void start() {
-        BigInteger startBlock = BigInteger.valueOf(69986475
+        // 初始化时获取最新区块号作为起始点
+        BigInteger latestBlock = fetchLatestBlockNumber();
+        if (latestBlock != null) {
+            lastProcessedBlock.set(latestBlock);
+            log.info("Transfer log polling initialized from block {}", latestBlock);
+        } else {
+            log.warn("Failed to fetch latest block number, starting from block 0");
+            lastProcessedBlock.set(BigInteger.ZERO);
+        }
+        
+        // 启动定时轮询任务
+        transferLogTask = transferLogScheduler.scheduleAtFixedRate(
+                this::pollTransferLogs,
+                0L,
+                TRANSFER_LOG_POLL_INTERVAL_SECONDS,
+                TimeUnit.SECONDS
         );
-        BigInteger endBlock = BigInteger.valueOf(69986660
-        );
-        EthFilter filter = new EthFilter(
-                new DefaultBlockParameterNumber(startBlock),
-                new DefaultBlockParameterNumber(endBlock),
-                tokenAddress);
-//        EthFilter filter = new EthFilter(
-//                DefaultBlockParameterName.LATEST,
-//                DefaultBlockParameterName.LATEST,
-//                tokenAddress);
-        filter.addSingleTopic(EventEncoder.encode(TRANSFER_EVENT));
-        web3j.ethLogFlowable(filter).subscribe(this::handleTransferLog, throwable ->
-                log.error("Error processing trade analysis transfer log", throwable));
+        
+        log.info("Transfer log polling task started (interval: {} seconds)", TRANSFER_LOG_POLL_INTERVAL_SECONDS);
+    }
+    
+    /**
+     * 定时拉取 Transfer 事件
+     */
+    private void pollTransferLogs() {
+        try {
+            BigInteger latestBlock = fetchLatestBlockNumber();
+            if (latestBlock == null) {
+                log.warn("Failed to fetch latest block number for Transfer log polling");
+                return;
+            }
+            
+            BigInteger lastBlock = lastProcessedBlock.get();
+            if (lastBlock == null) {
+                lastBlock = BigInteger.ZERO;
+            }
+            
+            // 如果上次查询的区块号已经是最新区块，跳过
+            if (lastBlock.compareTo(latestBlock) >= 0) {
+                return;
+            }
+            
+            // 从上次查询的区块+1开始，到最新区块，分段拉取
+            BigInteger currentStart = lastBlock.add(BigInteger.ONE);
+            BigInteger lastProcessed = lastBlock;
+            
+            while (currentStart.compareTo(latestBlock) <= 0) {
+                BigInteger endBlock = currentStart.add(MAX_LOG_BLOCK_RANGE).subtract(BigInteger.ONE);
+                if (endBlock.compareTo(latestBlock) > 0) {
+                    endBlock = latestBlock;
+                }
+                
+                // 拉取 Transfer 事件
+                EthFilter filter = new EthFilter(
+                        DefaultBlockParameter.valueOf(currentStart),
+                        DefaultBlockParameter.valueOf(endBlock),
+                        tokenAddress
+                );
+                filter.addSingleTopic(EventEncoder.encode(TRANSFER_EVENT));
+                
+                try {
+                    EthLog response = web3j.ethGetLogs(filter).send();
+                    if (response.hasError()) {
+                        log.warn("Failed to fetch Transfer logs (blocks {}-{}): {}", 
+                                currentStart, endBlock, response.getError());
+                        break; // 出错时停止拉取
+                    }
+                    
+                    int eventCount = 0;
+                    if (response.getLogs() != null) {
+                        for (EthLog.LogResult<?> logResult : response.getLogs()) {
+                            Object raw = logResult.get();
+                            if (raw instanceof Log) {
+                                handleTransferLog((Log) raw);
+                                eventCount++;
+                            }
+                        }
+                    }
+                    
+                    if (eventCount > 0) {
+                        log.debug("Polled {} Transfer events (blocks {}-{})", 
+                                eventCount, currentStart, endBlock);
+                    }
+                    
+                    lastProcessed = endBlock;
+                    
+                    // 如果已经到达最新区块，退出循环
+                    if (endBlock.compareTo(latestBlock) >= 0) {
+                        break;
+                    }
+                    
+                    // 继续下一段
+                    currentStart = endBlock.add(BigInteger.ONE);
+                    
+                } catch (Exception e) {
+                    log.error("Error polling Transfer events (blocks {}-{})", 
+                            currentStart, endBlock, e);
+                    break; // 出错时停止拉取
+                }
+            }
+            
+            // 更新最后处理的区块号
+            if (lastProcessed.compareTo(lastBlock) > 0) {
+                lastProcessedBlock.set(lastProcessed);
+            }
+            
+        } catch (Exception e) {
+            log.error("Error in Transfer log polling task", e);
+        }
+    }
+    
+    /**
+     * 获取最新区块号
+     */
+    private BigInteger fetchLatestBlockNumber() {
+        try {
+            return web3j.ethBlockNumber().send().getBlockNumber();
+        } catch (IOException e) {
+            log.error("Failed to fetch latest block number", e);
+            return null;
+        }
     }
 
     /**
@@ -293,55 +430,81 @@ public class TradeAnalysisService {
     private void handleTransferLog(Log logEntry) {
         try {
             String txHash = logEntry.getTransactionHash();
-            if(!txHash.equals("0xe97cda8cff8c9cc0a4b6196bae472f27602142b5bbb34f0708c8f5ac6ae01492")){
-                return;
-            }
             if (txHash == null || txHash.isEmpty()) {
                 return;
             }
-
             if (!processedTransactions.add(txHash)) {
                 return;
             }
+            long startTime = System.currentTimeMillis();
 
-            Optional<Transaction> transactionOpt = fetchTransaction(txHash);
-            if (!transactionOpt.isPresent()) {
+            System.out.println("转账触发时间："+startTime);
+            BigInteger blockNumber = logEntry.getBlockNumber();
+
+            // 并发获取交易信息和交易回执，设置超时避免长时间阻塞
+            CompletableFuture<Optional<Transaction>> transactionFuture = CompletableFuture.supplyAsync(
+                    () -> fetchTransaction(txHash), asyncExecutor);
+            CompletableFuture<Optional<TransactionReceipt>> receiptFuture = CompletableFuture.supplyAsync(
+                    () -> fetchTransactionReceipt(txHash), asyncExecutor);
+
+            // 等待两个结果，设置超时（2秒）
+            Optional<Transaction> transactionOpt;
+            Optional<TransactionReceipt> receiptOpt;
+            try {
+                transactionOpt = transactionFuture.get(2, TimeUnit.SECONDS);
+                receiptOpt = receiptFuture.get(2, TimeUnit.SECONDS);
+            } catch (TimeoutException e) {
+                log.warn("Timeout fetching transaction data for {} (2s)", txHash);
+                return;
+            } catch (java.util.concurrent.ExecutionException | InterruptedException e) {
+                log.error("Failed to fetch transaction data for {}", txHash, e);
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
                 return;
             }
-            String txFrom = transactionOpt.get().getFrom();
+            System.out.println("获取完交易树耗时:"+(System.currentTimeMillis() - startTime));
+
+            if (!transactionOpt.isPresent() || !receiptOpt.isPresent()) {
+                return;
+            }
+
+            Transaction transaction = transactionOpt.get();
+            TransactionReceipt receipt = receiptOpt.get();
+
+            String txFrom = transaction.getFrom();
             if (txFrom == null) {
                 return;
             }
             String txFromNormalized = normalizeAddress(txFrom);
 
-            Optional<TransactionReceipt> receiptOpt = fetchTransactionReceipt(txHash);
-            if (!receiptOpt.isPresent()) {
-                return;
-            }
-            TransactionReceipt receipt = receiptOpt.get();
             if (receipt.getLogs() == null || receipt.getLogs().isEmpty()) {
                 return;
             }
 
-            // 存储所有目标代币的 Transfer 事件
-            storeTransferEvents(receipt.getLogs(), txHash, logEntry.getBlockNumber());
-
-            Optional<TradeDetection> detectionOpt = analyseTransactionLogs(txFromNormalized, receipt.getLogs(),txHash);
-            if (!detectionOpt.isPresent()) {
-                return;
-            }
-            TradeDetection detection = detectionOpt.get();
-
-            BigInteger blockNumber = logEntry.getBlockNumber();
+            // 确定区块号
             if (blockNumber == null) {
                 blockNumber = receipt.getBlockNumber();
                 if (blockNumber == null) {
                     return;
                 }
             }
-            Optional<Long> timestampOpt = fetchBlockTimestamp(blockNumber);
-            long timestamp = timestampOpt.orElse(Instant.now().toEpochMilli());
+
+            // 获取区块时间戳（使用缓存）
+            long timestamp = getBlockTimestamp(blockNumber);
+
+            // 存储所有目标代币的 Transfer 事件（传入时间戳避免重复查询）
+            storeTransferEvents(receipt.getLogs(), txHash, blockNumber, timestamp);
+
+            Optional<TradeDetection> detectionOpt = analyseTransactionLogs(txFromNormalized, receipt.getLogs(), txHash);
+            System.out.println("分析完交易树swap耗时:"+(System.currentTimeMillis() - startTime));
+            if (!detectionOpt.isPresent()) {
+                return;
+            }
+            TradeDetection detection = detectionOpt.get();
+
             Optional<BigDecimal> priceOpt = priceService.getPriceAtBlock(blockNumber);
+            System.out.println("获取完价格耗时:"+(System.currentTimeMillis() - startTime));
             BigDecimal price = priceOpt.orElse(BigDecimal.ZERO);
             BigDecimal usdValue = detection.tradeAmount.multiply(price);
 
@@ -349,27 +512,29 @@ public class TradeAnalysisService {
 
             Instant eventTime = Instant.ofEpochMilli(timestamp);
             String formattedTime = eventTime.atZone(TARGET_ZONE).format(TIME_FORMATTER);
-            String message = String.format("TRADE address=%s action=%s amount=%s %s price=$%s value=$%s totalBuyAmount=%s totalSellAmount=%s " +
-                            "totalBuyValue=$%s totalSellValue=$%s netAmount=%s netValue=$%s avgBuyPrice=$%s avgSellPrice=$%s trades=%s block=%s time=%s txHash=%s",
-                    txFrom,
-                    detection.direction.getDisplay(),
-                    detection.tradeAmount.setScale(6, RoundingMode.HALF_UP),
-                    tokenSymbol,
-                    price.setScale(8, RoundingMode.HALF_UP),
-                    usdValue.setScale(6, RoundingMode.HALF_UP),
-                    summary.totalBuyAmount.setScale(6, RoundingMode.HALF_UP),
-                    summary.totalSellAmount.setScale(6, RoundingMode.HALF_UP),
-                    summary.totalBuyValue.setScale(6, RoundingMode.HALF_UP),
-                    summary.totalSellValue.setScale(6, RoundingMode.HALF_UP),
-                    summary.netAmount.setScale(6, RoundingMode.HALF_UP),
-                    summary.netValue.setScale(6, RoundingMode.HALF_UP),
-                    summary.avgBuyPrice.setScale(8, RoundingMode.HALF_UP),
-                    summary.avgSellPrice.setScale(8, RoundingMode.HALF_UP),
-                    summary.tradeCount,
-                    blockNumber,
-                    formattedTime,
-                    txHash);
-            log.info(message);
+
+            // 使用 StringBuilder 优化字符串拼接
+            StringBuilder messageBuilder = new StringBuilder(512);
+            messageBuilder.append("TRADE address=").append(txFrom)
+                    .append(" action=").append(detection.direction.getDisplay())
+                    .append(" amount=").append(detection.tradeAmount.setScale(6, RoundingMode.HALF_UP))
+                    .append(" ").append(tokenSymbol)
+                    .append(" price=$").append(price.setScale(8, RoundingMode.HALF_UP))
+                    .append(" value=$").append(usdValue.setScale(6, RoundingMode.HALF_UP))
+                    .append(" totalBuyAmount=").append(summary.totalBuyAmount.setScale(6, RoundingMode.HALF_UP))
+                    .append(" totalSellAmount=").append(summary.totalSellAmount.setScale(6, RoundingMode.HALF_UP))
+                    .append(" totalBuyValue=$").append(summary.totalBuyValue.setScale(6, RoundingMode.HALF_UP))
+                    .append(" totalSellValue=$").append(summary.totalSellValue.setScale(6, RoundingMode.HALF_UP))
+                    .append(" netAmount=").append(summary.netAmount.setScale(6, RoundingMode.HALF_UP))
+                    .append(" netValue=$").append(summary.netValue.setScale(6, RoundingMode.HALF_UP))
+                    .append(" avgBuyPrice=$").append(summary.avgBuyPrice.setScale(8, RoundingMode.HALF_UP))
+                    .append(" avgSellPrice=$").append(summary.avgSellPrice.setScale(8, RoundingMode.HALF_UP))
+                    .append(" trades=").append(summary.tradeCount)
+                    .append(" block=").append(blockNumber)
+                    .append(" time=").append(formattedTime)
+                    .append(" txHash=").append(txHash);
+            log.info(messageBuilder.toString());
+            
             if (databaseLogService != null) {
                 int tradeCount = summary.tradeCount > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) summary.tradeCount;
                 databaseLogService.logTradeSummary(txHash,
@@ -391,6 +556,10 @@ public class TradeAnalysisService {
                         blockNumber,
                         eventTime);
             }
+            long endTime = System.currentTimeMillis();
+            System.out.println("转账处理完毕时间："+endTime);
+
+            System.out.println("总耗时："+(endTime-startTime ));
         } catch (Exception ex) {
             log.error("Failed to analyse trade", ex);
         }
@@ -486,10 +655,10 @@ public class TradeAnalysisService {
 
     /**
      * 根据目标代币的输入额（delta）构建交易识别结果
-     * 注意：方向判断已根据用户反馈进行反转
-     * delta > 0 表示收到目标代币，delta < 0 表示付出目标代币
+     * delta > 0 表示用户向 uniswap 发送了目标代币（用户付出，卖出）
+     * delta < 0 表示 uniswap 向用户发送了目标代币（用户收到，买入）
      *
-     * @param delta  目标代币的输入额（正数=收到代币，负数=付出代币）
+     * @param delta  目标代币的输入额（正数=用户付出代币，负数=用户收到代币）
      * @param txHash 交易哈希
      * @return 交易识别结果
      */
@@ -500,14 +669,13 @@ public class TradeAnalysisService {
         }
 
         BigDecimal tradeAmount = toDecimalAmount(delta.abs());
-        // delta 表示目标代币的变化量（从交易者的角度）
-        // delta > 0: 交易者收到目标代币（买入目标代币，用其他代币换取目标代币）
-        // delta < 0: 交易者付出目标代币（卖出目标代币，用目标代币换取其他代币）
-        // 根据用户反馈，方向判断需要反转
+        // delta 表示目标代币的变化量（从用户的角度）
+        // delta > 0: 用户向 uniswap 发送了目标代币（卖出目标代币，用目标代币换取其他代币）
+        // delta < 0: uniswap 向用户发送了目标代币（买入目标代币，用其他代币换取目标代币）
         TradeDirection direction = delta.signum() > 0 ? TradeDirection.SELL : TradeDirection.BUY;
         
-        BigDecimal totalIn = delta.signum() < 0 ? tradeAmount : BigDecimal.ZERO;
-        BigDecimal totalOut = delta.signum() > 0 ? tradeAmount : BigDecimal.ZERO;
+        BigDecimal totalIn = delta.signum() > 0 ? tradeAmount : BigDecimal.ZERO;  // 卖出时，用户付出目标代币
+        BigDecimal totalOut = delta.signum() < 0 ? tradeAmount : BigDecimal.ZERO; // 买入时，用户收到目标代币
 
         return Optional.of(new TradeDetection(direction, tradeAmount, totalIn, totalOut));
     }
@@ -543,13 +711,13 @@ public class TradeAnalysisService {
 
     /**
      * 分析 Swap 事件，计算目标代币的输入额（delta）
-     * 正数表示收到目标代币，负数表示付出目标代币
-     * 注意：最终的方向判断在 buildTradeDetectionFromDelta 中已根据用户反馈进行反转
+     * 正数 = 用户向 uniswap 发送了多少代币（用户付出）
+     * 负数 = uniswap 需要向用户发送多少代币（用户收到）
      *
      * @param topic0 Swap 事件签名
      * @param entry  日志条目
      * @param topics 主题列表
-     * @return 目标代币的输入额（delta），正数=收到代币，负数=付出代币
+     * @return 目标代币的输入额（delta），正数=用户付出代币，负数=用户收到代币
      */
     private Optional<BigInteger> analyseSwapForTargetToken(String topic0, Log entry, List<String> topics) {
         // 获取池子元数据
@@ -583,11 +751,11 @@ public class TradeAnalysisService {
             BigInteger amount0Out = ((Uint256) decoded.get(2)).getValue();
             BigInteger amount1Out = ((Uint256) decoded.get(3)).getValue();
             
-            // 目标代币的输入额 = 输出 - 输入（正数=收到代币，负数=付出代币）
+            // 目标代币的输入额 = 输入 - 输出（正数=用户付出代币，负数=用户收到代币）
             if (isToken0) {
-                targetTokenDelta = amount0Out.subtract(amount0In);
+                targetTokenDelta = amount0In.subtract(amount0Out);
             } else {
-                targetTokenDelta = amount1Out.subtract(amount1In);
+                targetTokenDelta = amount1In.subtract(amount1Out);
             }
         }
         // V3 Swap 事件处理
@@ -603,10 +771,9 @@ public class TradeAnalysisService {
             BigInteger amount1 = ((Int256) decoded.get(1)).getValue();
             
             // V3 中 amount0/amount1 是池子的变化量（正数=池子增加，负数=池子减少）
-            // 交易者的变化量 = -池子的变化量
-            // 正数=交易者收到，负数=交易者付出
+            // 用户的变化量 = 池子的变化量（正数=用户付出，负数=用户收到）
             BigInteger poolDelta = isToken0 ? amount0 : amount1;
-            targetTokenDelta = poolDelta.negate();
+            targetTokenDelta = poolDelta;
         }
         // V4 Swap 事件处理
         else if (PANCAKESWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0) || UNISWAP_EVENT_SIGNATURE_V4_NORMALIZED.equals(topic0)) {
@@ -621,8 +788,9 @@ public class TradeAnalysisService {
             BigInteger amount1 = ((Int128) decoded.get(1)).getValue();
             
             // V4 中 amount0/amount1 是池子的变化量（正数=池子增加，负数=池子减少）
-            // 交易者的变化量 = -池子的变化量
-            // 正数=交易者收到，负数=交易者付出
+            // 注意：V4 与 V2/V3 相反，需要取反
+            // 原先 池子增加（正数） = 用户收到代币（买入），池子减少（负数） = 用户付出代币（卖出）
+            // 所以用户的变化量 = -池子的变化量（正数=用户收到代币，负数=用户付出代币）
             BigInteger poolDelta = isToken0 ? amount0 : amount1;
             targetTokenDelta = poolDelta.negate();
         } else {
@@ -799,22 +967,49 @@ public class TradeAnalysisService {
     }
 
     /**
-     * 获取区块时间戳
+     * 获取区块时间戳（带缓存）
+     *
+     * @param blockNumber 区块高度
+     * @return 时间戳（毫秒）
+     */
+    private long getBlockTimestamp(BigInteger blockNumber) {
+        if (blockNumber == null) {
+            return Instant.now().toEpochMilli();
+        }
+        
+        // 先查缓存
+        Long cached = blockTimestampCache.get(blockNumber);
+        if (cached != null) {
+            return cached;
+        }
+        
+        // 缓存未命中，从链上获取
+        try {
+            EthBlock block = web3j.ethGetBlockByNumber(DefaultBlockParameter.valueOf(blockNumber), false).send();
+            if (block.getBlock() == null || block.getBlock().getTimestamp() == null) {
+                long fallback = Instant.now().toEpochMilli();
+                blockTimestampCache.put(blockNumber, fallback);
+                return fallback;
+            }
+            long timestamp = block.getBlock().getTimestamp().multiply(BigInteger.valueOf(1000L)).longValue();
+            blockTimestampCache.put(blockNumber, timestamp);
+            return timestamp;
+        } catch (IOException e) {
+            log.error("Failed to fetch block timestamp for block {}", blockNumber, e);
+            long fallback = Instant.now().toEpochMilli();
+            blockTimestampCache.put(blockNumber, fallback);
+            return fallback;
+        }
+    }
+
+    /**
+     * 获取区块时间戳（返回 Optional，用于兼容旧代码）
      *
      * @param blockNumber 区块高度
      * @return 时间戳
      */
     private Optional<Long> fetchBlockTimestamp(BigInteger blockNumber) {
-        try {
-            EthBlock block = web3j.ethGetBlockByNumber(DefaultBlockParameter.valueOf(blockNumber), false).send();
-            if (block.getBlock() == null) {
-                return Optional.empty();
-            }
-            return Optional.of(block.getBlock().getTimestamp().multiply(BigInteger.valueOf(1000L)).longValue());
-        } catch (IOException e) {
-            log.error("Failed to fetch block timestamp", e);
-            return Optional.empty();
-        }
+        return Optional.of(getBlockTimestamp(blockNumber));
     }
 
     /**
@@ -860,14 +1055,21 @@ public class TradeAnalysisService {
      * @param logs        交易所有日志
      * @param txHash      交易哈希
      * @param blockNumber 区块号
+     * @param timestamp   区块时间戳（毫秒），如果为 null 则从链上获取
      */
-    private void storeTransferEvents(List<Log> logs, String txHash, BigInteger blockNumber) {
+    private void storeTransferEvents(List<Log> logs, String txHash, BigInteger blockNumber, Long timestamp) {
         if (databaseLogService == null || logs == null || logs.isEmpty()) {
             return;
         }
 
-        Optional<Long> timestampOpt = blockNumber != null ? fetchBlockTimestamp(blockNumber) : Optional.empty();
-        Instant eventTime = timestampOpt.isPresent() ? Instant.ofEpochMilli(timestampOpt.get()) : Instant.now();
+        Instant eventTime;
+        if (timestamp != null) {
+            eventTime = Instant.ofEpochMilli(timestamp);
+        } else if (blockNumber != null) {
+            eventTime = Instant.ofEpochMilli(getBlockTimestamp(blockNumber));
+        } else {
+            eventTime = Instant.now();
+        }
 
         for (Log entry : logs) {
             // 只处理目标代币的 Transfer 事件

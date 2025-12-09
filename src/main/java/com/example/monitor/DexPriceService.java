@@ -41,8 +41,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
@@ -88,11 +91,21 @@ public class DexPriceService {
     private final Map<String, BigDecimal> poolUsdTvlCache = new ConcurrentHashMap<>();
     /** 价格刷新调度器 */
     private final ScheduledExecutorService priceRefreshExecutor;
+    /** 价格刷新线程池（用于并发刷新） */
+    private final ScheduledExecutorService priceRefreshWorkerPool;
 
     /** 价格计算精度 */
     private static final MathContext PRICE_MATH_CONTEXT = new MathContext(40, RoundingMode.HALF_UP);
     /** 价格样本最大存活时间（毫秒） */
-    private static final long PRICE_SAMPLE_TTL_MILLIS = 15_000L;
+    private static final long PRICE_SAMPLE_TTL_MILLIS = 30_000L;  // 增加到 30 秒，减少缓存过期概率
+    /** 价格刷新间隔（秒） */
+    private static final long PRICE_REFRESH_INTERVAL_SECONDS = 10L;
+    /** 并发刷新线程数 */
+    private static final int PRICE_REFRESH_THREAD_COUNT = 10;
+    /** 单个池子刷新超时时间（秒） */
+    private static final long POOL_REFRESH_TIMEOUT_SECONDS = 3L;
+    /** 稳定币价格查询超时时间（秒） */
+    private static final long STABLE_PRICE_QUERY_TIMEOUT_SECONDS = 2L;
     /** 池子参与价格计算所需的最小 TVL（美元） */
     private static final BigDecimal MIN_POOL_TVL_USD = new BigDecimal("500");
 
@@ -113,7 +126,16 @@ public class DexPriceService {
         this.priceRefreshExecutor = Executors.newSingleThreadScheduledExecutor(new ThreadFactory() {
             @Override
             public Thread newThread(Runnable r) {
-                Thread thread = new Thread(r, "dex-price-refresh");
+                Thread thread = new Thread(r, "dex-price-refresh-scheduler");
+                thread.setDaemon(true);
+                return thread;
+            }
+        });
+        this.priceRefreshWorkerPool = Executors.newScheduledThreadPool(PRICE_REFRESH_THREAD_COUNT, new ThreadFactory() {
+            private int counter = 0;
+            @Override
+            public Thread newThread(Runnable r) {
+                Thread thread = new Thread(r, "dex-price-refresh-worker-" + (++counter));
                 thread.setDaemon(true);
                 return thread;
             }
@@ -170,26 +192,101 @@ public class DexPriceService {
     private void startPriceRefreshTask() {
         priceRefreshExecutor.scheduleAtFixedRate(() -> {
             try {
-                refreshAllKnownPools();
-                log.info("刷新价格样本完成");
+                refreshStalePools();
             } catch (Exception ex) {
                 log.error("Failed to refresh pool prices", ex);
             }
-        }, 0L, 5L, TimeUnit.SECONDS);
+        }, 0L, PRICE_REFRESH_INTERVAL_SECONDS, TimeUnit.SECONDS);
     }
 
     /**
-     * 刷新所有已知池子的价格样本
+     * 刷新所有过期的池子价格样本（并发执行）
      */
-    private void refreshAllKnownPools() {
-        List<PairMetadata> snapshot = new ArrayList<>(pairCacheByAddress.values());
-        for (PairMetadata metadata : snapshot) {
-            refreshPriceForPool(metadata);
+    private void refreshStalePools() {
+        long now = System.currentTimeMillis();
+        List<PairMetadata> stalePools = new ArrayList<>();
+        
+        // 找出所有过期的池子
+        for (PairMetadata metadata : pairCacheByAddress.values()) {
+            if (metadata == null || metadata.pairAddress == null) {
+                continue;
+            }
+            String key = normalize(metadata.pairAddress);
+            PriceSample sample = poolPriceCache.get(key);
+            if (isSampleStale(sample, now)) {
+                stalePools.add(metadata);
+            }
+        }
+        
+        if (stalePools.isEmpty()) {
+            log.debug("No stale pools to refresh");
+            return;
+        }
+        
+        log.info("Refreshing {} stale pools (total: {})", stalePools.size(), pairCacheByAddress.size());
+        
+        // 并发刷新过期的池子
+        CountDownLatch latch = new CountDownLatch(stalePools.size());
+        for (PairMetadata metadata : stalePools) {
+            priceRefreshWorkerPool.submit(() -> {
+                try {
+                    refreshPriceForPoolWithTimeout(metadata);
+                } catch (Exception ex) {
+                    log.debug("Failed to refresh price for pool {}", metadata.pairAddress, ex);
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+        
+        // 等待所有刷新完成，但设置最大等待时间
+        try {
+            boolean completed = latch.await(PRICE_REFRESH_INTERVAL_SECONDS, TimeUnit.SECONDS);
+            if (!completed) {
+                log.warn("Price refresh timeout: {} pools still refreshing", latch.getCount());
+            } else {
+                log.debug("Price refresh completed for {} pools", stalePools.size());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Price refresh interrupted");
         }
     }
 
     /**
-     * 刷新指定池子的价格样本
+     * 刷新指定池子的价格样本（带超时控制）
+     */
+    private Optional<PriceSample> refreshPriceForPoolWithTimeout(PairMetadata metadata) {
+        if (metadata == null || metadata.pairAddress == null) {
+            return Optional.empty();
+        }
+        
+        try {
+            // 使用 Future 实现超时控制
+            Future<Optional<PriceSample>> future = priceRefreshWorkerPool.submit(() -> {
+                try {
+                    Optional<PriceSample> sampleOpt = buildPriceSample(metadata);
+                    sampleOpt.ifPresent(sample -> poolPriceCache.put(normalize(metadata.pairAddress), sample));
+                    return sampleOpt;
+                } catch (Exception ex) {
+                    log.debug("Failed to build price sample for pool {}", metadata.pairAddress, ex);
+                    return Optional.<PriceSample>empty();
+                }
+            });
+            
+            Optional<PriceSample> result = future.get(POOL_REFRESH_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            return result;
+        } catch (java.util.concurrent.TimeoutException e) {
+            log.debug("Price refresh timeout for pool {}", metadata.pairAddress);
+            return Optional.empty();
+        } catch (Exception ex) {
+            log.debug("Failed to refresh price sample for pool {}", metadata.pairAddress, ex);
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * 刷新指定池子的价格样本（同步方法，用于按需刷新）
      */
     private Optional<PriceSample> refreshPriceForPool(PairMetadata metadata) {
         if (metadata == null || metadata.pairAddress == null) {
@@ -378,21 +475,19 @@ public class DexPriceService {
             return Optional.of(cached);
         }
 
-        for (String stable : DexConstants.STABLE_TOKEN_ADDRESSES) {
-            Optional<BigDecimal> direct = getBestPriceForPair(tokenAddress, stable, blockNumber);
-            if (direct.isPresent()) {
-                return Optional.of(storePrice(blockNumber, direct.get()));
-            }
+        // 并发查询所有稳定币的直接价格
+        Optional<BigDecimal> directPrice = getBestDirectPriceConcurrent(tokenAddress, blockNumber);
+        if (directPrice.isPresent()) {
+            return Optional.of(storePrice(blockNumber, directPrice.get()));
         }
 
+        // 尝试通过 WBNB 间接获取价格
         Optional<BigDecimal> tokenWbnb = getBestPriceForPair(tokenAddress, DexConstants.WBNB_ADDRESS, blockNumber);
-        for (String stable : DexConstants.STABLE_TOKEN_ADDRESSES) {
-            Optional<BigDecimal> viaWbnb = combinePrices(
-                    tokenWbnb,
-                    getBestPriceForPairForV2V3(DexConstants.WBNB_ADDRESS, stable, blockNumber)
-            );
-            if (viaWbnb.isPresent()) {
-                return Optional.of(storePrice(blockNumber, viaWbnb.get()));
+        if (tokenWbnb.isPresent()) {
+            // 并发查询 WBNB 到稳定币的价格
+            Optional<BigDecimal> viaWbnbPrice = getBestViaWbnbPriceConcurrent(tokenWbnb.get(), blockNumber);
+            if (viaWbnbPrice.isPresent()) {
+                return Optional.of(storePrice(blockNumber, viaWbnbPrice.get()));
             }
         }
 
@@ -401,6 +496,140 @@ public class DexPriceService {
             return Optional.of(fallback);
         }
 
+        return Optional.empty();
+    }
+
+    /**
+     * 并发查询所有稳定币的直接价格（返回第一个成功的结果）
+     */
+    private Optional<BigDecimal> getBestDirectPriceConcurrent(String tokenAddress, BigInteger blockNumber) {
+        List<CompletableFuture<Optional<BigDecimal>>> futures = DexConstants.STABLE_TOKEN_ADDRESSES.stream()
+                .map(stable -> CompletableFuture.supplyAsync(
+                        () -> getBestPriceForPair(tokenAddress, stable, blockNumber),
+                        priceRefreshWorkerPool
+                ))
+                .collect(Collectors.toList());
+
+        // 快速检查：如果所有 future 都已完成，立即检查结果
+        boolean allDone = futures.stream().allMatch(CompletableFuture::isDone);
+        if (allDone) {
+            for (CompletableFuture<Optional<BigDecimal>> future : futures) {
+                try {
+                    Optional<BigDecimal> result = future.get();
+                    if (result.isPresent()) {
+                        return result;
+                    }
+                } catch (Exception e) {
+                    // 忽略
+                }
+            }
+            return Optional.empty();
+        }
+
+        // 使用 anyOf 快速返回第一个成功的结果，设置较短的超时
+        @SuppressWarnings("unchecked")
+        CompletableFuture<Optional<BigDecimal>> anyOf = CompletableFuture.anyOf(
+                futures.toArray(new CompletableFuture[0])
+        ).thenApply(result -> (Optional<BigDecimal>) result);
+        
+        try {
+            // 设置较短的超时时间（50ms），快速返回，不阻塞业务
+            Optional<BigDecimal> result = anyOf.get(50, TimeUnit.MILLISECONDS);
+            if (result.isPresent()) {
+                futures.forEach(f -> f.cancel(true));
+                return result;
+            }
+        } catch (java.util.concurrent.TimeoutException e) {
+            // 超时后，检查是否有已完成的结果
+            for (CompletableFuture<Optional<BigDecimal>> future : futures) {
+                if (future.isDone()) {
+                    try {
+                        Optional<BigDecimal> result = future.get();
+                        if (result.isPresent()) {
+                            futures.forEach(f -> f.cancel(true));
+                            return result;
+                        }
+                    } catch (Exception ex) {
+                        // 忽略
+                    }
+                }
+            }
+            // 如果都没有结果，取消所有任务并返回空
+            futures.forEach(f -> f.cancel(true));
+        } catch (Exception e) {
+            // 忽略异常
+            log.debug("Failed to get direct price for stable token", e);
+        }
+        
+        return Optional.empty();
+    }
+
+    /**
+     * 并发查询 WBNB 到所有稳定币的价格（返回第一个成功的结果）
+     */
+    private Optional<BigDecimal> getBestViaWbnbPriceConcurrent(BigDecimal tokenWbnbPrice, BigInteger blockNumber) {
+        List<CompletableFuture<Optional<BigDecimal>>> futures = DexConstants.STABLE_TOKEN_ADDRESSES.stream()
+                .map(stable -> CompletableFuture.supplyAsync(
+                        () -> {
+                            Optional<BigDecimal> wbnbStable = getBestPriceForPairForV2V3(
+                                    DexConstants.WBNB_ADDRESS, stable, blockNumber);
+                            return combinePrices(Optional.of(tokenWbnbPrice), wbnbStable);
+                        },
+                        priceRefreshWorkerPool
+                ))
+                .collect(Collectors.toList());
+
+        // 快速检查：如果所有 future 都已完成，立即检查结果
+        boolean allDone = futures.stream().allMatch(CompletableFuture::isDone);
+        if (allDone) {
+            for (CompletableFuture<Optional<BigDecimal>> future : futures) {
+                try {
+                    Optional<BigDecimal> result = future.get();
+                    if (result.isPresent()) {
+                        return result;
+                    }
+                } catch (Exception e) {
+                    // 忽略
+                }
+            }
+            return Optional.empty();
+        }
+
+        // 使用 anyOf 快速返回第一个成功的结果，设置较短的超时
+        @SuppressWarnings("unchecked")
+        CompletableFuture<Optional<BigDecimal>> anyOf = CompletableFuture.anyOf(
+                futures.toArray(new CompletableFuture[0])
+        ).thenApply(result -> (Optional<BigDecimal>) result);
+        
+        try {
+            // 设置较短的超时时间（50ms），快速返回，不阻塞业务
+            Optional<BigDecimal> result = anyOf.get(50, TimeUnit.MILLISECONDS);
+            if (result.isPresent()) {
+                futures.forEach(f -> f.cancel(true));
+                return result;
+            }
+        } catch (java.util.concurrent.TimeoutException e) {
+            // 超时后，检查是否有已完成的结果
+            for (CompletableFuture<Optional<BigDecimal>> future : futures) {
+                if (future.isDone()) {
+                    try {
+                        Optional<BigDecimal> result = future.get();
+                        if (result.isPresent()) {
+                            futures.forEach(f -> f.cancel(true));
+                            return result;
+                        }
+                    } catch (Exception ex) {
+                        // 忽略
+                    }
+                }
+            }
+            // 如果都没有结果，取消所有任务并返回空
+            futures.forEach(f -> f.cancel(true));
+        } catch (Exception e) {
+            // 忽略异常
+            log.debug("Failed to get via WBNB price for stable token", e);
+        }
+        
         return Optional.empty();
     }
 
@@ -623,12 +852,21 @@ public class DexPriceService {
             }
             String key = normalize(metadata.pairAddress);
             PriceSample sample = poolPriceCache.get(key);
-            if (isSampleStale(sample, now)) {
-                Optional<PriceSample> refreshed = refreshPriceForPool(metadata);
-                if (refreshed.isPresent()) {
-                    sample = refreshed.get();
-                }
+            
+            // 如果缓存过期或不存在，触发异步刷新
+            if (isSampleStale(sample, now) || sample == null) {
+                // 异步刷新，不阻塞当前请求
+                priceRefreshWorkerPool.submit(() -> {
+                    try {
+                        refreshPriceForPoolWithTimeout(metadata);
+                    } catch (Exception ex) {
+                        log.debug("Failed to refresh price for pool {} in background", metadata.pairAddress, ex);
+                    }
+                });
             }
+            
+            // ✅ 使用缓存（即使过期也使用，避免同步 RPC 调用）
+            // 定时刷新机制会保证缓存最终更新
             if (sample != null) {
                 if (!passesUsdTvlFilter(sample)) {
                     continue;
@@ -639,16 +877,8 @@ public class DexPriceService {
                     continue;
                 }
             }
-            Optional<BigDecimal> fallback = calculatePrice(metadata, baseToken, null);
-            if (fallback.isPresent()) {
-                BigDecimal weight = sample != null
-                        ? firstPositive(sample.tvlInToken0, sample.tvlInToken1, sample.liquidityWeight)
-                        : null;
-                if (weight == null || weight.compareTo(BigDecimal.ZERO) <= 0) {
-                    weight = BigDecimal.ONE;
-                }
-                prices.add(new WeightedPrice(fallback.get().setScale(18, RoundingMode.HALF_UP), weight));
-            }
+            // ✅ 如果没有缓存，直接跳过（不调用同步 fallback）
+            // 定时刷新会在下次刷新时填充缓存
         }
         return prices;
     }
